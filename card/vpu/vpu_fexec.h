@@ -64,6 +64,12 @@
 #define VPU_X_LOOP       6   /* a split loop's head reached: the loop id in exit_aux */
 #define VPU_X_DEFER_FULL 7
 #define VPU_X_LIMIT      8
+#define VPU_X_JUMP       9   /* the host resumes at exit_rip (a branch out, an indirect jump, a return) */
+#define VPU_FXF_IDSTACK  1   /* K_FEXEC flags: the file's rsp is the program's stack at identity */
+#define VPU_FX_EXIT_TPOFF 1048 /* fs-relative: the exit stub's address (TLS_EXEC + 24) */
+#define VPU_FX_S_KIND    436 /* scratch slots the exit reads: the kind, the resume address, the aux */
+#define VPU_FX_S_SITE    440
+#define VPU_FX_S_XFER    448
 
 struct vpu_stripe { uint64_t lo, hi; };
 
@@ -88,6 +94,7 @@ struct vpu_slot_req {
     uint32_t wb_bytes;         /* their bytes together */
     uint64_t fill_off;         /* K_RESIDENT: the range of the chunk to fill from the staging slot */
     uint64_t fill_len;         /* (0: the page only, nothing copied) */
+    uint64_t canary;           /* K_FEXEC: the program's stack-protector canary (fs:0x28), set in every thread's TLS */
 };
 
 /* The reply, at VPU_SLOT_REPLY: the fields, then seq last. */
@@ -104,7 +111,7 @@ struct vpu_slot_reply {
     uint32_t wb_n;
     uint32_t defer_n;
     uint32_t threads_ran;
-    uint32_t pad;
+    uint32_t siginfo;          /* X_FAULT, X_REFUSED: the signal number | si_code << 8 */
     uint64_t free_bytes;       /* the card's free memory when the reply was written */
 };
 
@@ -122,7 +129,7 @@ struct vpu_slot_mail {
 #define VPU_SLOT_MAIL     3072
 #define VPU_SLOT_PROGRESS 3136   /* uint64_t defer_n, card-written while an instance runs */
 
-_Static_assert(sizeof(struct vpu_slot_req) == 352, "slot request layout is shared with the card and the preload");
+_Static_assert(sizeof(struct vpu_slot_req) == 360, "slot request layout is shared with the card and the preload");
 _Static_assert(sizeof(struct vpu_slot_reply) == 88, "slot reply layout is shared");
 _Static_assert(sizeof(struct vpu_slot_mail) == 40, "slot mail layout is shared");
 

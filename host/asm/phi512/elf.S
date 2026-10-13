@@ -28,7 +28,7 @@
 	.set ST_SIZE, 16
 	.set ST_BYTES, 24
 	.set STT_FUNC, 2
-	.set MAPS_CAP, 65536
+	.set MAPS_CAP, 1048576			# /proc/self/maps whole (a read returns a page of lines at a time: maps_read loops)
 
 	.bss
 	.balign 64
@@ -82,24 +82,9 @@ elf_init:
 	movq %r12, exe_len(%rip)
 	# the base: the first line of /proc/self/maps whose offset field is
 	# 00000000 and whose path is a file (the executable is mapped first)
-	leaq s_maps(%rip), %rdi
-	movl $O_RDONLY | O_CLOEXEC, %esi
-	xorl %edx, %edx
-	SYS SYS_open
+	call maps_read
 	testq %rax, %rax
-	js 9f
-	movq %rax, %rbx
-	movl %ebx, %edi
-	leaq maps_buf(%rip), %rsi
-	movl $MAPS_CAP - 1, %edx
-	SYS SYS_read
-	movq %rax, %r12
-	movl %ebx, %edi
-	SYS SYS_close
-	testq %r12, %r12
 	jle 9f
-	leaq maps_buf(%rip), %rax
-	movb $0, (%rax,%r12)
 	# the first line: "START-END perms OFFSET dev inode path"
 	leaq maps_buf(%rip), %rsi
 	call parse_hex
@@ -211,24 +196,9 @@ mapped_range:
 	pushq %r12
 	pushq %r13
 	movq %rdi, %r13
-	leaq s_maps(%rip), %rdi
-	movl $O_RDONLY | O_CLOEXEC, %esi
-	xorl %edx, %edx
-	SYS SYS_open
+	call maps_read
 	testq %rax, %rax
-	js 9f
-	movq %rax, %rbx
-	movl %ebx, %edi
-	leaq maps_buf(%rip), %rsi
-	movl $MAPS_CAP - 1, %edx
-	SYS SYS_read
-	movq %rax, %r12
-	movl %ebx, %edi
-	SYS SYS_close
-	testq %r12, %r12
 	jle 9f
-	leaq maps_buf(%rip), %rax
-	movb $0, (%rax,%r12)
 	leaq maps_buf(%rip), %rsi
 1:	cmpb $0, (%rsi)
 	je 9f
@@ -286,26 +256,9 @@ copy_mapped:
 	testq %rax, %rax
 	js 9f
 	movq %rax, mem_fd(%rip)
-14:	leaq s_maps(%rip), %rdi
-	movl $O_RDONLY | O_CLOEXEC, %esi
-	xorl %edx, %edx
-	SYS SYS_open
+14:	call maps_read
 	testq %rax, %rax
-	js 9f
-	movq %rax, %rbx
-	movl %ebx, %edi
-	leaq maps_buf(%rip), %rsi
-	movl $MAPS_CAP - 1, %edx
-	SYS SYS_read
-	movq %rax, %rcx
-	movl %ebx, %edi
-	pushq %rcx
-	SYS SYS_close
-	popq %rcx
-	testq %rcx, %rcx
 	jle 9f
-	leaq maps_buf(%rip), %rax
-	movb $0, (%rax,%rcx)
 	leaq maps_buf(%rip), %rsi
 1:	cmpb $0, (%rsi)
 	je 9f
@@ -351,5 +304,315 @@ copy_mapped:
 	popq %r14
 	popq %r13
 	popq %r12
+	popq %rbx
+	ret
+
+	.text
+# elf_func_at(addr rdi): the function (a FUNC symbol of .symtab with a
+# size) of the loaded object that holds the address, the executable or
+# a shared object (obj_at): rax its loaded address (0 when none), rdx
+# its size, rcx its name (in the file's string table, mapped for good).
+	.globl elf_func_at
+elf_func_at:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $8, %rsp				# the object's entry
+	movq %rdi, %r15
+	call obj_at
+	testq %rax, %rax
+	jz 9f
+	movq %rax, (%rsp)
+	subq OBJ_BASE(%rax), %r15		# the offset in the object
+	movq OBJ_MAP(%rax), %rbx
+	movq EH_SHOFF(%rbx), %r12
+	addq %rbx, %r12
+	movzwl EH_SHNUM(%rbx), %r13d
+	xorl %r14d, %r14d
+1:	cmpl %r13d, %r14d
+	jae 9f
+	movq %r14, %rax
+	shlq $6, %rax
+	addq %r12, %rax
+	cmpl $SHT_SYMTAB, SH_TYPE(%rax)
+	je 2f
+	incl %r14d
+	jmp 1b
+2:	movl SH_LINK(%rax), %ecx
+	shlq $6, %rcx
+	addq %r12, %rcx
+	movq SH_OFFSET(%rcx), %rcx
+	addq %rbx, %rcx				# strtab
+	movq SH_OFFSET(%rax), %rdx
+	addq %rbx, %rdx				# symbols
+	movq SH_SIZE(%rax), %r8
+	addq %rdx, %r8				# end
+3:	cmpq %r8, %rdx
+	jae 9f
+	movzbl ST_INFO(%rdx), %eax
+	andl $0xf, %eax
+	cmpl $STT_FUNC, %eax
+	jne 5f
+	cmpq $0, ST_SIZE(%rdx)
+	je 5f
+	movq ST_VALUE(%rdx), %rax
+	cmpq %rax, %r15
+	jb 5f
+	addq ST_SIZE(%rdx), %rax
+	cmpq %rax, %r15
+	jae 5f
+	movq ST_VALUE(%rdx), %rax
+	movq (%rsp), %rdi
+	addq OBJ_BASE(%rdi), %rax
+	movl ST_NAME(%rdx), %esi
+	addq %rsi, %rcx				# the name
+	movq ST_SIZE(%rdx), %rdx
+	jmp 8f
+5:	addq $ST_BYTES, %rdx
+	jmp 3b
+9:	xorl %eax, %eax
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+8:	addq $8, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# The loaded objects seen so far: the executable and the shared objects
+# a fault has landed in, each mapped whole from its file for its symbol
+# table, with its load base (the mapping's start less its file offset:
+# the text segment's virtual address equals its file offset) and the
+# span of its mappings.
+	.bss
+	.balign 64
+obj_tab:	.skip OBJ_MAX * OBJ_BYTES
+obj_n:		.skip 8
+	.text
+
+# maps_fields(rsi just after a line's END field): rax the line's file
+# offset, rsi at its path (or at the line's end when it has none).
+maps_fields:
+	addq $6, %rsi				# ' ', the four permission characters, ' '
+	call parse_hex				# the offset
+	pushq %rax
+	incq %rsi
+1:	cmpb $' ', (%rsi)			# the device
+	je 2f
+	incq %rsi
+	jmp 1b
+2:	incq %rsi
+3:	movzbl (%rsi), %ecx			# the inode
+	cmpl $' ', %ecx
+	je 4f
+	cmpl $'\n', %ecx
+	je 5f
+	testl %ecx, %ecx
+	jz 5f
+	incq %rsi
+	jmp 3b
+4:	cmpb $' ', (%rsi)			# the spaces before the path
+	jne 5f
+	incq %rsi
+	jmp 4b
+5:	popq %rax
+	ret
+
+# obj_at(addr rdi): the loaded object (a file-backed mapping) holding
+# the address: its entry (OBJ_*), or 0 (not a file, or not an ELF file,
+# or the table full).
+	.globl obj_at
+obj_at:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %r12
+	leaq obj_tab(%rip), %rbx
+	movq obj_n(%rip), %rcx
+1:	testq %rcx, %rcx
+	jz 2f
+	cmpq OBJ_LO(%rbx), %r12
+	jb 11f
+	cmpq OBJ_HI(%rbx), %r12
+	jae 11f
+	movq %rbx, %rax
+	jmp 8f
+11:	addq $OBJ_BYTES, %rbx
+	decq %rcx
+	jmp 1b
+2:	call maps_read
+	testq %rax, %rax
+	jle 9f
+	leaq maps_buf(%rip), %rsi
+3:	cmpb $0, (%rsi)
+	je 9f
+	call parse_hex
+	movq %rax, %r13				# start
+	incq %rsi
+	call parse_hex
+	movq %rax, %r14				# end
+	cmpq %r13, %r12
+	jb 4f
+	cmpq %r14, %r12
+	jae 4f
+	call maps_fields
+	movq %rax, %r15				# the file offset
+	cmpb $'/', (%rsi)
+	jne 9f					# not a file
+	jmp 5f
+4:	movzbl (%rsi), %ecx
+	testl %ecx, %ecx
+	jz 9f
+	incq %rsi
+	cmpl $'\n', %ecx
+	jne 4b
+	jmp 3b
+5:	movq obj_n(%rip), %rax
+	cmpq $OBJ_MAX, %rax
+	jae 9f
+	imulq $OBJ_BYTES, %rax, %rbx
+	leaq obj_tab(%rip), %rax
+	addq %rax, %rbx				# the new entry
+	leaq OBJ_PATH(%rbx), %rdi
+	xorl %ecx, %ecx
+51:	movzbl (%rsi,%rcx), %eax
+	cmpl $'\n', %eax
+	je 52f
+	testl %eax, %eax
+	jz 52f
+	cmpl $OBJ_PATH_CAP - 1, %ecx
+	jae 52f
+	movb %al, (%rdi,%rcx)
+	incl %ecx
+	jmp 51b
+52:	movb $0, (%rdi,%rcx)
+	leaq OBJ_PATH(%rbx), %rdi
+	movl $O_RDONLY | O_CLOEXEC, %esi
+	xorl %edx, %edx
+	SYS SYS_open
+	testq %rax, %rax
+	js 9f
+	movq %rax, %r14				# the file
+	movl %r14d, %edi
+	leaq stat_buf(%rip), %rsi
+	SYS SYS_fstat
+	testq %rax, %rax
+	jnz 53f
+	movq stat_buf + STAT_SIZE(%rip), %rsi
+	movq %rsi, OBJ_LEN(%rbx)
+	xorl %edi, %edi
+	movl $PROT_READ, %edx
+	movl $MAP_PRIVATE, %r10d
+	movq %r14, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	movq %rax, OBJ_MAP(%rbx)
+	movl %r14d, %edi
+	SYS SYS_close
+	movq OBJ_MAP(%rbx), %rax
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 9f
+	cmpl $0x464c457f, (%rax)		# "\177ELF"
+	jne 9f
+	movq %r13, %rax
+	subq %r15, %rax
+	movq %rax, OBJ_BASE(%rbx)
+	# the span: every line of the maps with this path
+	movq $-1, OBJ_LO(%rbx)
+	movq $0, OBJ_HI(%rbx)
+	leaq maps_buf(%rip), %rsi
+6:	cmpb $0, (%rsi)
+	je 7f
+	call parse_hex
+	movq %rax, %r13
+	incq %rsi
+	call parse_hex
+	movq %rax, %r14
+	call maps_fields
+	movq %r13, %rdx
+	subq %rax, %rdx
+	cmpq OBJ_BASE(%rbx), %rdx		# a mapping of the loaded object: start less file offset is the base (another mapping of the same file is not)
+	jne 63f
+	leaq OBJ_PATH(%rbx), %rdi
+	xorl %ecx, %ecx
+61:	movzbl (%rdi,%rcx), %eax
+	movzbl (%rsi,%rcx), %edx
+	testl %eax, %eax
+	jz 62f
+	cmpl %eax, %edx
+	jne 63f
+	incl %ecx
+	jmp 61b
+62:	cmpl $'\n', %edx
+	je 64f
+	testl %edx, %edx
+	jnz 63f
+64:	cmpq OBJ_LO(%rbx), %r13
+	jae 65f
+	movq %r13, OBJ_LO(%rbx)
+65:	cmpq OBJ_HI(%rbx), %r14
+	jbe 63f
+	movq %r14, OBJ_HI(%rbx)
+63:	movzbl (%rsi), %ecx
+	testl %ecx, %ecx
+	jz 7f
+	incq %rsi
+	cmpl $'\n', %ecx
+	jne 63b
+	jmp 6b
+7:	incq obj_n(%rip)
+	movq %rbx, %rax
+	jmp 8f
+53:	movl %r14d, %edi
+	SYS SYS_close
+9:	xorl %eax, %eax
+8:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+	.text
+# maps_read: /proc/self/maps whole into maps_buf, NUL-terminated; rax
+# the bytes, 0 or negative when it cannot be read. One read returns a
+# page of whole lines at a time (4051 bytes measured on the rack kernel
+# 7.2.9, 2026-10-13), so the reads loop to the end of the file; the
+# stack is the last line, and a short read lost it once.
+	.globl maps_read
+maps_read:
+	pushq %rbx
+	pushq %r12
+	leaq s_maps(%rip), %rdi
+	movl $O_RDONLY | O_CLOEXEC, %esi
+	xorl %edx, %edx
+	SYS SYS_open
+	testq %rax, %rax
+	js 9f
+	movq %rax, %rbx
+	xorl %r12d, %r12d			# the bytes so far
+1:	movl %ebx, %edi
+	leaq maps_buf(%rip), %rsi
+	addq %r12, %rsi
+	movl $MAPS_CAP - 1, %edx
+	subq %r12, %rdx
+	jle 2f					# full
+	SYS SYS_read
+	testq %rax, %rax
+	jle 2f
+	addq %rax, %r12
+	jmp 1b
+2:	movl %ebx, %edi
+	SYS SYS_close
+	leaq maps_buf(%rip), %rax
+	movb $0, (%rax,%r12)
+	movq %r12, %rax
+9:	popq %r12
 	popq %rbx
 	ret

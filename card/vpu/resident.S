@@ -297,6 +297,7 @@ res_map_all:
 	pushq %r12
 	pushq %r13
 	pushq %r14
+	movq $0, res_map_failed(%rip)
 	xorl %ebx, %ebx				# index
 	xorl %r13d, %r13d			# moved
 1:	cmpq res_n(%rip), %rbx
@@ -313,7 +314,7 @@ res_map_all:
 	movq %r12, %rdi
 	call resv_free
 	testl %eax, %eax
-	jz 9f					# taken on this card: refused
+	jz 11f					# taken on this card: refused (the rest still placed)
 	# the run: pages rbx .. rbx + n - 1 resident, unplaced, at addresses
 	# r12 + k x 2 MiB (one mremap, one TLB shootdown for the run)
 	movl $1, %r14d
@@ -348,7 +349,7 @@ res_map_all:
 	movq %r12, %r8
 	SYS SYS_mremap
 	cmpq %r12, %rax
-	jne 9f
+	jne 11f
 4:	leaq res_mapped(%rip), %rax
 	btsq %rbx, (%rax)
 	incl %r13d
@@ -358,8 +359,12 @@ res_map_all:
 	jmp 1b
 7:	incq %rbx
 	jmp 1b
+11:	movq $1, res_map_failed(%rip)		# this chunk cannot be placed: the next ones still are
+	incq %rbx
+	jmp 1b
 8:	movl %r13d, %eax
-	jmp 10f
+	cmpq $0, res_map_failed(%rip)
+	je 10f
 9:	movl $-1, %eax
 10:	popq %r14
 	popq %r13
@@ -441,6 +446,7 @@ res_flush:
 	.bss
 	.balign 64
 resv_bits:	.skip RESV_PIECES / 8
+res_map_failed:	.skip 8
 	.text
 
 # reserve_high: the reservation, once, before the worker's first mmap:

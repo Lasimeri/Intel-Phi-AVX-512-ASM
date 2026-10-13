@@ -115,7 +115,8 @@
 	.set TLS_CORE, 16
 	.set TLS_MATE, 24
 	.set TLS_ALTSTACK, 32
-	.set TLS_STACK, 40
+	.set TLS_CANARY, 40			# the program's stack-protector canary (glibc's fs:0x28), from the K_FEXEC request
+	.set TLS_STACK, 64
 	.set TLS_SEEN, 48
 	.set SCRATCH_DISP, 64
 	.set TLS_EXEC, 1024

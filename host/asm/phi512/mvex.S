@@ -167,6 +167,10 @@ em_mvex:
 1:	cmpl $RM_MEM, %eax
 	jne 2f
 	movq MV_MEMP(%rbx), %r14
+	pushq %rdi
+	movq %r14, %rsi
+	call em_addr_regs			# rax or rcx as the base or index: the program's values back
+	popq %rdi
 	movzbl IN_INDEX(%r14), %ecx
 	cmpl $0xff, %ecx
 	je 11f
@@ -1151,3 +1155,311 @@ em_finish:
 .Lb_test_eax: .byte 0x85, 0xc0
 .Lb_mov_ah: .byte 0x64, 0x8a, 0x24, 0x25
 	.section .note.GNU-stack,"",@progbits
+
+	.text
+# em_lea(em rdi, r esi, in rdx): lea r64, [the decoded instruction's
+# memory operand] (base, index, scale, disp; a rebased rip-relative
+# operand has its scratch register as the base and no displacement).
+	.globl em_lea
+em_lea:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	movq %rdx, %r13
+	movzbl IN_BASE(%r13), %r14d
+	movzbl IN_INDEX(%r13), %r15d
+	# REX.W R X B
+	movl $0x48, %eax
+	movl %r12d, %ecx
+	shrl $3, %ecx
+	andl $1, %ecx
+	shll $2, %ecx
+	orl %ecx, %eax
+	cmpl $0xff, %r15d
+	je 1f
+	cmpl $8, %r15d
+	jb 1f
+	orl $2, %eax
+1:	cmpl $0xff, %r14d
+	je 2f
+	cmpl $8, %r14d
+	jb 2f
+	orl $1, %eax
+2:	movq %rbx, %rdi
+	call em_byte
+	movl $0x8d, %eax
+	movq %rbx, %rdi
+	call em_byte
+	movl %r12d, %ecx
+	andl $7, %ecx
+	shll $3, %ecx				# the reg field
+	cmpl $0xff, %r14d
+	jne 3f
+	# no base: mod 00, SIB with base 101 and the index (100 none), disp32
+	movl %ecx, %eax
+	orl $0x04, %eax
+	movq %rbx, %rdi
+	call em_byte
+	movzbl IN_SCALE(%r13), %eax
+	shll $6, %eax
+	movl $4, %edx
+	cmpl $0xff, %r15d
+	je 21f
+	movl %r15d, %edx
+	andl $7, %edx
+21:	shll $3, %edx
+	orl %edx, %eax
+	orl $5, %eax
+	movq %rbx, %rdi
+	call em_byte
+	jmp 5f
+3:	movl %r14d, %eax
+	andl $7, %eax
+	cmpl $0xff, %r15d
+	jne 4f
+	cmpl $4, %eax
+	je 4f
+	# [base + disp32]: mod 10
+	orl %ecx, %eax
+	orl $0x80, %eax
+	movq %rbx, %rdi
+	call em_byte
+	jmp 5f
+4:	# a SIB: mod 10, rm 100
+	movl %ecx, %eax
+	orl $0x84, %eax
+	movq %rbx, %rdi
+	call em_byte
+	movzbl IN_SCALE(%r13), %eax
+	shll $6, %eax
+	movl $4, %edx
+	cmpl $0xff, %r15d
+	je 41f
+	movl %r15d, %edx
+	andl $7, %edx
+41:	shll $3, %edx
+	orl %edx, %eax
+	movl %r14d, %edx
+	andl $7, %edx
+	orl %edx, %eax
+	movq %rbx, %rdi
+	call em_byte
+5:	movl IN_DISP(%r13), %eax
+	movq %rbx, %rdi
+	call em_dword
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# em_unaligned_any(em rdi, d esi, in rdx, k ecx, ll r8d, store r9d): an
+# unaligned move of unknown alignment, no program mask: the address
+# into rcx (lea), its low two bits tested; 4-byte aligned takes the
+# pack/unpack pair (the card's unaligned forms need the element's
+# alignment); else the bytes bounce through S_XFER with scalar qword
+# moves (any alignment): 2, 4 or 8 qwords for 128, 256, 512 bits. The
+# branches are rel32, patched here. rax and rcx are saved first.
+	.globl em_unaligned_any
+em_unaligned_any:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 32, %rsp
+	movq %rdi, %rbx
+	movl %esi, %r12d			# d
+	movq %rdx, %r13				# in
+	movl %ecx, MV_BYTES(%rsp)		# k (the lanes)
+	movl %r8d, %r14d			# ll
+	movl %r9d, %r15d			# store
+	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	call em_addr_regs			# the operand's rax/rcx as the program has them
+	movq %rbx, %rdi
+	movl $1, %esi
+	movq %r13, %rdx
+	call em_lea				# lea rcx, [m]
+	movq %rbx, %rdi
+	leaq .Lb_testcl3(%rip), %rsi
+	movl $3, %edx
+	call em_bytes				# test cl, 3
+	movq %rbx, %rdi
+	leaq .Lb_jz32(%rip), %rsi
+	movl $6, %edx
+	call em_bytes				# jz rel32 (to the pair)
+	movq EM_OUT(%rbx), %rax
+	movq %rax, MV_BYTES + 8(%rsp)		# the end of the jz (its disp32 at -4)
+	# the slow path: the qwords
+	movl $2, %eax
+	cmpl $0, %r14d
+	je 1f
+	movl $4, %eax
+	cmpl $1, %r14d
+	je 1f
+	movl $8, %eax
+1:	movl %eax, MV_BYTES + 16(%rsp)		# qwords
+	testl %r15d, %r15d
+	jz 3f
+	# a store: vmovaps [fs:S_XFER], d; then mov rax, [fs:S_XFER + 8i]; mov [rcx + 8i], rax
+	movq %rsp, %rdi
+	movl $1, %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	movl $0x29, %r8d
+	movl %r12d, %r9d
+	call mv_set
+	movq %rsp, %rdi
+	movl $RM_FS, %esi
+	movl $S_XFER, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	xorl %ecx, %ecx
+2:	movl %ecx, MV_BYTES + 20(%rsp)
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	movl MV_BYTES + 20(%rsp), %ecx
+	shll $3, %ecx
+	addl $S_XFER, %ecx
+	xorl %r8d, %r8d
+	call em_gpr_scratch			# mov rax, [fs:S_XFER + 8i]
+	movq %rbx, %rdi
+	movl MV_BYTES + 20(%rsp), %eax
+	shll $3, %eax
+	movl %eax, MV_BYTES + 24(%rsp)
+	movb $0x48, MV_BYTES + 28(%rsp)
+	movb $0x89, MV_BYTES + 29(%rsp)
+	movb $0x41, MV_BYTES + 30(%rsp)
+	movb %al, MV_BYTES + 31(%rsp)
+	leaq MV_BYTES + 28(%rsp), %rsi
+	movl $4, %edx
+	call em_bytes				# mov [rcx + 8i], rax
+	movl MV_BYTES + 20(%rsp), %ecx
+	incl %ecx
+	cmpl MV_BYTES + 16(%rsp), %ecx
+	jb 2b
+	jmp 5f
+3:	# a load: mov rax, [rcx + 8i]; mov [fs:S_XFER + 8i], rax; then vmovaps d, [fs:S_XFER]
+	xorl %ecx, %ecx
+4:	movl %ecx, MV_BYTES + 20(%rsp)
+	movl %ecx, %eax
+	shll $3, %eax
+	movb $0x48, MV_BYTES + 28(%rsp)
+	movb $0x8b, MV_BYTES + 29(%rsp)
+	movb $0x41, MV_BYTES + 30(%rsp)
+	movb %al, MV_BYTES + 31(%rsp)
+	movq %rbx, %rdi
+	leaq MV_BYTES + 28(%rsp), %rsi
+	movl $4, %edx
+	call em_bytes				# mov rax, [rcx + 8i]
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	movl MV_BYTES + 20(%rsp), %ecx
+	shll $3, %ecx
+	addl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:S_XFER + 8i], rax
+	movl MV_BYTES + 20(%rsp), %ecx
+	incl %ecx
+	cmpl MV_BYTES + 16(%rsp), %ecx
+	jb 4b
+	movq %rbx, %rdi
+	movl %r12d, %esi
+	movl $RM_FS, %edx
+	movl $S_XFER, %ecx
+	xorl %r8d, %r8d
+	xorl %r9d, %r9d
+	call em_vmov				# vmovaps d, [fs:S_XFER]
+5:	movq %rbx, %rdi
+	leaq .Lb_jmp32(%rip), %rsi
+	movl $5, %edx
+	call em_bytes				# jmp rel32 (over the pair)
+	movq EM_OUT(%rbx), %rax
+	movq %rax, MV_BYTES + 8 + 8(%rsp)	# the end of the jmp
+	# the jz lands here: patch
+	movq EM_OUT(%rbx), %rax
+	movq MV_BYTES + 8(%rsp), %rcx
+	subq %rcx, %rax
+	movl %eax, -4(%rcx)
+	# the pair
+	movq %rbx, %rdi
+	movl %r12d, %esi
+	movq %r13, %rdx
+	movl MV_BYTES(%rsp), %ecx
+	xorl %r8d, %r8d
+	movl %r15d, %r9d
+	pushq $0
+	pushq $0
+	call em_unaligned
+	addq $16, %rsp
+	# the jmp lands here: patch
+	movq EM_OUT(%rbx), %rax
+	movq MV_BYTES + 16(%rsp), %rcx
+	subq %rcx, %rax
+	movl %eax, -4(%rcx)
+	addq $MV_BYTES + 32, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+.Lb_testcl3: .byte 0xf6, 0xc1, 0x03
+.Lb_jz32: .byte 0x0f, 0x84, 0, 0, 0, 0
+.Lb_jmp32: .byte 0xe9, 0, 0, 0, 0
+	.text
+
+	.text
+# em_addr_regs(em rdi, in rsi): the program's rax and rcx back from
+# their slots when the decoded instruction's memory operand uses them
+# as the base or index and the sequence has taken them as transients
+# (the mask immediate goes through eax): before any instruction that
+# evaluates the operand.
+	.globl em_addr_regs
+em_addr_regs:
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	cmpb $0, IN_BASE(%r12)
+	je 1f
+	cmpb $0, IN_INDEX(%r12)
+	jne 2f
+1:	testl $EU_RAX, EM_USED(%rbx)
+	jz 2f
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	movl $S_RAX, %ecx
+	xorl %r8d, %r8d
+	call em_gpr_scratch
+2:	cmpb $1, IN_BASE(%r12)
+	je 3f
+	cmpb $1, IN_INDEX(%r12)
+	jne 4f
+3:	testl $EU_RCX, EM_USED(%rbx)
+	jz 4f
+	movq %rbx, %rdi
+	movl $1, %esi
+	movl $1, %edx
+	movl $S_RCX, %ecx
+	xorl %r8d, %r8d
+	call em_gpr_scratch
+4:	popq %r12
+	popq %rbx
+	ret

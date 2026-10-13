@@ -320,3 +320,33 @@ seed_entry:
 	popq %rbx
 	ret
 	.section .note.GNU-stack,"",@progbits
+
+	.text
+# seed_dyn_add(addr rdi): a dynamic seed for the executable's function
+# that holds addr (elf_func_at): the record after the last (the table
+# has SEEDS_DYN_MAX of them after the static ones), its name, address
+# and length set, no plan (the region path runs it); rax the seed, 0
+# when no function holds addr or the table is full.
+	.globl seed_dyn_add
+seed_dyn_add:
+	pushq %rbx
+	call elf_func_at
+	testq %rax, %rax
+	jz 9f
+	movq nseeds(%rip), %rbx
+	cmpq $3 + SEEDS_DYN_MAX, %rbx
+	jae 9f
+	imulq $SD_BYTES, %rbx, %rbx
+	leaq seeds(%rip), %rsi
+	addq %rsi, %rbx
+	movq %rcx, SD_NAME(%rbx)
+	movq %rax, SD_ADDR(%rbx)
+	movq %rdx, SD_LEN(%rbx)
+	movl $OPK_NONE, SD_OPS + OP_KIND(%rbx)
+	movq %rbx, %rax
+	incq nseeds(%rip)
+	popq %rbx
+	ret
+9:	xorl %eax, %eax
+	popq %rbx
+	ret

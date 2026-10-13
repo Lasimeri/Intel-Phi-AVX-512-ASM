@@ -16,6 +16,7 @@
 #   them (at FN_ADDR), rcx = the object (OB_*)) -> rax = 0, or the
 #   refusal (a string; BL_REFUSED and BL_REFUSED_OFF say where).
 
+	.include "proto.inc"
 	.include "x86dec.inc"
 	.include "fnscan.inc"
 	.include "xlate.inc"
@@ -37,7 +38,7 @@ s_badmap:	.asciz "a branch target without a map entry"
 	.set F_IN, 0				# the decoded block
 	.set F_I, IN_BYTES			# the entry's number
 	.set F_OB, IN_BYTES + 8			# the object
-	.set F_SCR, IN_BYTES + 16		# the scratch register of a re-based operand (-1 none)
+	.set F_SCR, IN_BYTES + 16		# the scratch register of a re-based operand (-1 none); +8 a slot number
 	.set F_BYTES, IN_BYTES + 32
 
 	.globl blob_build
@@ -99,11 +100,13 @@ blob_build:
 	cmpl $K_PLT, %eax
 	je .Lcall
 	cmpl $K_ICALL, %eax
-	je .Lcopy
+	je .Licall
 	cmpl $K_IJMP, %eax
-	je .Lcopy
+	je .Licall
 	cmpl $K_RET, %eax
-	je .Lcopy
+	je .Lret
+	cmpl $K_TRAP, %eax
+	je .Ltrap
 	jmp .Lref_badkind
 .Ladvance:
 	incq F_I(%rsp)
@@ -259,20 +262,9 @@ blob_build:
 	movl $S_RIPB, %ecx
 	movl $1, %r8d
 	call .Lgpr_scratch
-	movl F_SCR + 8(%rsp), %ecx
-	movl $0x48, %eax
-	cmpl $8, %ecx
-	jb 1f
-	orl $1, %eax
-1:	call .Lbyte
-	movl F_SCR + 8(%rsp), %eax
-	andl $7, %eax
-	addl $0xb8, %eax
-	call .Lbyte
-	leaq F_IN + 8(%rsp), %rdx
-	movq IN_NEXT(%rdx), %rax
-	addq IN_DISP(%rdx), %rax
-	call .Lqword
+	popq %r10				# .Lrip_movabs reads the frame through rsp as a direct call sees it
+	call .Lrip_movabs
+	pushq %r10
 	ret
 # .Lrip_epilogue: mov r, [fs:S_RIPB].
 .Lrip_epilogue:
@@ -290,7 +282,9 @@ blob_build:
 	leaq F_IN(%rsp), %rdx
 	testb $H_RIPREL, IN_HAS(%rdx)
 	jz 1f
+	movb $1, scr_vector(%rip)		# the recipe re-encodes: any register serves as the base (the emitter takes rax and rcx)
 	call .Lscratch_gpr
+	movb $0, scr_vector(%rip)
 	testl %eax, %eax
 	js .Lref_noscratch
 	movl %eax, F_SCR(%rsp)
@@ -350,9 +344,17 @@ blob_build:
 	call .Ldword
 	jmp .Ladvance
 
-# A relative branch out of the function: to the original address
-# through the transfer slot; a conditional one skips the sequence when
-# not taken (the inverse condition over it).
+# The exits. A blob leaves the card through the exit stub (`jmp
+# *%fs:FX_EXIT_TPOFF`) with the exit's kind in [fs:S_KIND], the address
+# the host resumes at in [fs:S_SITE] and an aux in [fs:S_XFER]; the host
+# continues the program natively from there (a call executed, a branch
+# target, a return address, a syscall). .Lseq_slot (rax the value, ecx
+# the slot) writes a 64-bit value to a scratch slot through rax (saved
+# in S_RAX around it); .Lseq_kind writes the kind; .Lseq_jmp the jump.
+
+# A relative branch out of the function: X_JUMP to the target; a
+# conditional one skips the sequence when not taken (the inverse
+# condition over it).
 .Lbr_out:
 	leaq F_IN(%rsp), %rdx
 	cmpb $FL_LOOP, IN_FLOW(%rdx)
@@ -364,47 +366,176 @@ blob_build:
 	xorl $1, %eax
 	orl $0x70, %eax
 	call .Lbyte
-	movl $.Lseq_jmp_len, %eax
+	movl $.Lseq_slot_len + .Lseq_kind_len + .Lseq_jmp_len, %eax
 	call .Lbyte
 1:	movq IX_TGT(%r14), %rax
-	call .Lseq_xfer
-	movl $0x64, %eax
-	call .Lbyte
-	movl $0xff, %eax
-	call .Lbyte
-	movl $0x24, %eax
-	call .Lbyte
-	movl $0x25, %eax
-	call .Lbyte
-	movl $S_XFER, %eax
-	addl BL_SCRATCH(%rbx), %eax
-	call .Ldword
+	movl $S_SITE, %ecx
+	call .Lseq_slot
+	movl $X_JUMP, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
 	jmp .Ladvance
-	.set .Lseq_xfer_len, 9 + 10 + 9 + 9
-	.set .Lseq_jmp_len, .Lseq_xfer_len + 8
 
-# A direct call (inside the object or into the PLT): to the original
-# address through the transfer slot (call [fs:S_XFER]).
+# A direct call (inside the object or into the PLT): X_CALL at the call
+# site, the callee as the aux.
 .Lcall:
 	movq IX_TGT(%r14), %rax
-	call .Lseq_xfer
+	movl $S_XFER, %ecx
+	call .Lseq_slot
+	call .Lsite_slot
+	movl $X_CALL, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
+	jmp .Ladvance
+
+# An indirect call (X_CALL at the site, the callee as the aux) or jump
+# (X_JUMP to the target): the target from the register (mov [fs:slot],
+# r) or loaded from the memory operand through a scratch register (r
+# saved in S_GPR; a rip-relative operand through movabs r, address; mov
+# r, [r]; else mov r, [the operand] with the instruction's own ModRM, SIB
+# and displacement).
+.Licall:
+	leaq F_IN(%rsp), %rdx
+	movl $S_SITE, %r8d			# the slot the target goes to: S_SITE for a jump, S_XFER for a call
+	cmpb $K_IJMP, IX_KIND(%r14)
+	je 1f
+	movl $S_XFER, %r8d
+1:	movl %r8d, F_SCR + 8(%rsp)		# (F_SCR's neighbour word: the slot)
+	cmpb $3, IN_MOD(%rdx)
+	jne 2f
+	# call *reg / jmp *reg
+	movzbl IN_RM(%rdx), %esi
+	movl $1, %edx
+	movl F_SCR + 8(%rsp), %ecx
+	movl $1, %r8d
+	call .Lgpr_scratch
+	jmp 5f
+2:	call .Lscratch_gpr
+	testl %eax, %eax
+	js .Lref_noscratch
+	movl %eax, F_SCR(%rsp)
+	movl %eax, %esi
+	movl $1, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call .Lgpr_scratch
+	leaq F_IN(%rsp), %rdx
+	testb $H_RIPREL, IN_HAS(%rdx)
+	jz 3f
+	call .Lrip_movabs			# movabs r, the operand's address
+	# mov r, [r]: REX.W (R and B for r above 7) 8B, ModRM mod 00 reg r rm r
+	movl F_SCR(%rsp), %eax
+	movl $0x48, %ecx
+	cmpl $8, %eax
+	jb 21f
+	orl $5, %ecx
+21:	pushq %rax
+	movl %ecx, %eax
+	call .Lbyte
+	movl $0x8b, %eax
+	call .Lbyte
+	popq %rax
+	andl $7, %eax
+	movl %eax, %ecx
+	shll $3, %ecx
+	orl %ecx, %eax
+	call .Lbyte
+	jmp 4f
+3:	# mov r, [the operand]: a REX with W, R for r, and the instruction's X and B; 8B; the ModRM with reg = r; the SIB and displacement copied
+	movl $0x48, %eax
+	movl F_SCR(%rsp), %ecx
+	shrl $3, %ecx
+	andl $1, %ecx
+	shll $2, %ecx
+	orl %ecx, %eax
+	movzbl IN_REX(%rdx), %ecx
+	andl $3, %ecx
+	orl %ecx, %eax
+	call .Lbyte
+	movl $0x8b, %eax
+	call .Lbyte
+	leaq F_IN(%rsp), %rdx
+	movzbl IN_MODRM(%rdx), %eax
+	andl $0xc7, %eax
+	movl F_SCR(%rsp), %ecx
+	andl $7, %ecx
+	shll $3, %ecx
+	orl %ecx, %eax
+	call .Lbyte
+	leaq F_IN(%rsp), %rdx
+	movzbl IN_MODRM_OFF(%rdx), %ecx
+	incl %ecx				# after the ModRM
+	movl IX_OFF(%r14), %eax
+	leaq (%r13,%rax), %rsi
+	addq %rcx, %rsi
+	movzbl IX_LEN(%r14), %edx
+	subl %ecx, %edx				# the SIB and displacement (no immediate on these)
+	call .Lput
+4:	movl F_SCR(%rsp), %esi
+	movl $1, %edx
+	movl F_SCR + 8(%rsp), %ecx
+	movl $1, %r8d
+	call .Lgpr_scratch			# mov [fs:slot], r
+	movl F_SCR(%rsp), %esi
+	movl $1, %edx
+	movl $S_GPR, %ecx
+	xorl %r8d, %r8d
+	call .Lgpr_scratch			# r restored
+5:	cmpb $K_IJMP, IX_KIND(%r14)
+	je 6f
+	call .Lsite_slot
+	movl $X_CALL, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
+	jmp .Ladvance
+6:	movl $X_JUMP, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
+	jmp .Ladvance
+
+# A return: the return address popped into S_SITE, X_JUMP.
+.Lret:
 	movl $0x64, %eax
 	call .Lbyte
-	movl $0xff, %eax
+	movl $0x8f, %eax
 	call .Lbyte
-	movl $0x14, %eax
+	movl $0x04, %eax
 	call .Lbyte
 	movl $0x25, %eax
 	call .Lbyte
-	movl $S_XFER, %eax
+	movl $S_SITE, %eax
 	addl BL_SCRATCH(%rbx), %eax
 	call .Ldword
+	movl $X_RET, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
 	jmp .Ladvance
 
-# .Lseq_xfer (rax = the address): mov [fs:S_RAX], rax; movabs rax, the
-# address; mov [fs:S_XFER], rax; mov rax, [fs:S_RAX].
-.Lseq_xfer:
+# A trap: a syscall is X_SYSCALL at the site (the host executes it);
+# the others are refused.
+.Ltrap:
+	leaq F_IN(%rsp), %rdx
+	cmpb $1, IN_MAP(%rdx)
+	jne .Lref_badkind
+	cmpb $0x05, IN_OP(%rdx)
+	jne .Lref_badkind
+	call .Lsite_slot
+	movl $X_SYSCALL, %eax
+	call .Lseq_kind
+	call .Lseq_jmp
+	jmp .Ladvance
+
+# .Lsite_slot: the instruction's original address into S_SITE.
+.Lsite_slot:
+	movl IX_OFF(%r14), %eax
+	addq FN_ADDR(%r12), %rax
+	movl $S_SITE, %ecx
+	jmp .Lseq_slot
+# .Lseq_slot (rax the value, ecx the slot): mov [fs:S_RAX], rax; movabs
+# rax, value; mov [fs:slot], rax; mov rax, [fs:S_RAX]. 37 bytes.
+.Lseq_slot:
 	pushq %rax
+	pushq %rcx
 	xorl %esi, %esi
 	movl $1, %edx
 	movl $S_RAX, %ecx
@@ -414,11 +545,11 @@ blob_build:
 	call .Lbyte
 	movl $0xb8, %eax
 	call .Lbyte
-	movq (%rsp), %rax
+	movq 8(%rsp), %rax
 	call .Lqword
 	xorl %esi, %esi
 	movl $1, %edx
-	movl $S_XFER, %ecx
+	movl (%rsp), %ecx
 	movl $1, %r8d
 	call .Lgpr_scratch
 	xorl %esi, %esi
@@ -426,7 +557,58 @@ blob_build:
 	movl $S_RAX, %ecx
 	xorl %r8d, %r8d
 	call .Lgpr_scratch
+	popq %rcx
 	popq %rax
+	ret
+	.set .Lseq_slot_len, 9 + 10 + 9 + 9
+# .Lseq_kind (eax the kind): mov dword [fs:S_KIND], kind (64 C7 04 25 disp32 imm32). 12 bytes.
+.Lseq_kind:
+	pushq %rax
+	movl $0x64, %eax
+	call .Lbyte
+	movl $0xc7, %eax
+	call .Lbyte
+	movl $0x04, %eax
+	call .Lbyte
+	movl $0x25, %eax
+	call .Lbyte
+	movl $S_KIND, %eax
+	addl BL_SCRATCH(%rbx), %eax
+	call .Ldword
+	popq %rax
+	call .Ldword
+	ret
+	.set .Lseq_kind_len, 12
+# .Lseq_jmp: jmp *%fs:FX_EXIT_TPOFF (64 FF 24 25 disp32). 8 bytes.
+.Lseq_jmp:
+	movl $0x64, %eax
+	call .Lbyte
+	movl $0xff, %eax
+	call .Lbyte
+	movl $0x24, %eax
+	call .Lbyte
+	movl $0x25, %eax
+	call .Lbyte
+	movl $FX_EXIT_TPOFF, %eax
+	call .Ldword
+	ret
+	.set .Lseq_jmp_len, 8
+# .Lrip_movabs: movabs r, the operand's address (F_SCR the register).
+.Lrip_movabs:
+	movl F_SCR + 8(%rsp), %ecx
+	movl $0x48, %eax
+	cmpl $8, %ecx
+	jb 1f
+	orl $1, %eax
+1:	call .Lbyte
+	movl F_SCR + 8(%rsp), %eax
+	andl $7, %eax
+	addl $0xb8, %eax
+	call .Lbyte
+	leaq F_IN + 8(%rsp), %rdx
+	movq IN_NEXT(%rdx), %rax
+	addq IN_DISP(%rdx), %rax
+	call .Lqword
 	ret
 
 # Pass two: the branch fixups through the map, then the constants
@@ -626,6 +808,18 @@ blob_build:
 	leaq F_IN + 8(%rsp), %rdx
 	movq IN_ENTRYP(%rdx), %rcx
 	xorl %r8d, %r8d
+	testb $H_MEM, IN_HAS(%rdx)
+	jz 62f
+	movzbl IN_BASE(%rdx), %edi
+	cmpl $0xff, %edi
+	je 61f
+	btsl %edi, %r8d
+61:	movzbl IN_INDEX(%rdx), %edi
+	cmpl $0xff, %edi
+	je 62f
+	andl $15, %edi
+	btsl %edi, %r8d
+62:
 	testq %rcx, %rcx
 	jz 5f
 	movzbl EN_NOPS(%rcx), %esi
@@ -680,6 +874,8 @@ blob_build:
 5:	# the order of preference
 	leaq .Lscr_order(%rip), %rsi
 	movl $6, %ecx
+	cmpb $0, scr_vector(%rip)
+	jne 6f
 	cmpb $1, IN_ENC(%rdx)
 	jne 6f
 	movzbl IN_OP_OFF(%rdx), %eax
@@ -727,3 +923,6 @@ blob_build:
 9:	xorl %eax, %eax
 8:	ret
 	.section .note.GNU-stack,"",@progbits
+
+	.bss
+scr_vector:	.skip 8			# 1 while .Lscratch_gpr serves a re-encoded vector instruction (r8 and up whatever the original's encoding)

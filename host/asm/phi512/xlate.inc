@@ -23,7 +23,9 @@
 	.set S_CW, 424
 	.set S_CW2, 428
 	.set S_RIPB, 432
-	.set S_XFER, 448
+	.set S_KIND, 436			# an exit's kind (FX_S_KIND of proto.inc)
+	.set S_SITE, 440			# where the host resumes (FX_S_SITE)
+	.set S_XFER, 448			# (FX_S_XFER)
 	.set S_NTEMPS, 6
 # The emitter (struct em), one per translated instruction, on the
 # caller's stack. The output pointer and limit belong to the blob; the

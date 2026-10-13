@@ -77,6 +77,16 @@
 # host/asm/phi512/xlate.inc S_* lays it out.
 	.set FX_SCRATCH_TPOFF, 1536
 	.set FX_SCRATCH_BYTES, 512
+# The exit of a translated blob: `jmp *%fs:FX_EXIT_TPOFF` (the stub's
+# address, put in every thread's TLS block at TLS_EXEC + 24 by fexec_init)
+# with the exit's kind, the address the host resumes at and an aux (the
+# callee, the target) in the scratch area's slots.
+	.set FX_EXIT_TPOFF, 1048
+	.set FX_S_KIND, 436
+	.set FX_S_SITE, 440
+	.set FX_S_XFER, 448
+# K_FEXEC flags (SL_FLAGS).
+	.set FXF_IDSTACK, 1			# the file's rsp is the program's stack at identity: no run stack, no return stub
 	.set EXEC_MAX_RANGES, 64
 	.set EXEC_MAX_PAGES, 64
 	.set EXEC_MAX_THREADS, 64
@@ -272,6 +282,7 @@
 	.set X_LOOP, 6
 	.set X_DEFER_FULL, 7
 	.set X_LIMIT, 8
+	.set X_JUMP, 9				# the host resumes at the exit's rip (a branch out of the blob, an indirect jump, a return)
 # struct vpu_slot: the request at 0, the reply at SLOT_REPLY, the demand
 # mail at SLOT_MAIL, the progress line at SLOT_PROGRESS.
 	.set SL_SEQ, 0
@@ -294,7 +305,8 @@
 	.set SL_WB_BYTES, 332
 	.set SL_FILL_OFF, 336
 	.set SL_FILL_LEN, 344
-	.set SL_REQ_BYTES, 352
+	.set SL_CANARY, 352			# K_FEXEC: the program's stack-protector canary, put at fs:0x28 of every thread
+	.set SL_REQ_BYTES, 360
 	.set SLOT_REPLY, 2048
 	.set SR_SEQ, 0
 	.set SR_STATUS, 8
@@ -308,6 +320,7 @@
 	.set SR_WB_N, 64
 	.set SR_DEFER_N, 68
 	.set SR_THREADS_RAN, 72
+	.set SR_SIGINFO, 76			# a fault's signal number | si_code << 8 (X_FAULT, X_REFUSED)
 	.set SR_FREE_BYTES, 80
 	.set SR_BYTES, 88
 	.set SLOT_MAIL, 3072

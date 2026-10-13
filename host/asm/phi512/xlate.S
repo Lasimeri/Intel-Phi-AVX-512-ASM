@@ -151,6 +151,61 @@ xl_forms:
 	FORM MN_Vfmadd132ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0x99 << 24)), 0
 	FORM MN_Vfmadd213ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xa9 << 24)), 0
 	FORM MN_Vfmadd231ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xb9 << 24)), 0
+	# interleaves: per block two vpshufd (the immediates) and the lanes taken from the second source
+	FORM MN_Vunpcklps, xl_interleave, (0x50 | (0x50 << 8) | (0xaaaa << 16)), 0
+	FORM MN_Vunpckhps, xl_interleave, (0xfa | (0xfa << 8) | (0xaaaa << 16)), 0
+	FORM MN_Vpunpckldq, xl_interleave, (0x50 | (0x50 << 8) | (0xaaaa << 16)), 0
+	FORM MN_Vpunpckhdq, xl_interleave, (0xfa | (0xfa << 8) | (0xaaaa << 16)), 0
+	FORM MN_Vunpcklpd, xl_interleave, (0x44 | (0x44 << 8) | (0xcccc << 16)), 0
+	FORM MN_Vunpckhpd, xl_interleave, (0xee | (0xee << 8) | (0xcccc << 16)), 0
+	FORM MN_Vpunpcklqdq, xl_interleave, (0x44 | (0x44 << 8) | (0xcccc << 16)), 0
+	FORM MN_Vpunpckhqdq, xl_interleave, (0xee | (0xee << 8) | (0xcccc << 16)), 0
+	FORM MN_Vmovlhps, xl_interleave, (0x44 | (0x44 << 8) | (0xcccc << 16)), 0
+	FORM MN_Vmovhlps, xl_interleave, (0xee | (0xee << 8) | (0x3333 << 16)), 0
+	# the scalar compares into the flags
+	FORM MN_Vcomiss, xl_comis, 0, 0
+	FORM MN_Vucomiss, xl_comis, 0, 0
+	FORM MN_Vcomisd, xl_comis, 0, XB_QWORD
+	FORM MN_Vucomisd, xl_comis, 0, XB_QWORD
+	# a lane to and from a general register or memory
+	FORM MN_Vmovq, xl_movq, 1, 0
+	FORM MN_Vmovd, xl_movq, 0, 0
+	FORM MN_Vpinsrq, xl_pinsr, 1, 0
+	FORM MN_Vpinsrd, xl_pinsr, 0, 0
+	FORM MN_Vpextrq, xl_pextr, 1, 0
+	FORM MN_Vpextrd, xl_pextr, 0, 0
+	# a 16-byte block or a 32-byte half inserted
+	FORM MN_Vinserti32x4, xl_insert, 0, 0
+	FORM MN_Vinsertf32x4, xl_insert, 0, 0
+	FORM MN_Vinserti128, xl_insert, 0, 0
+	FORM MN_Vinsertf128, xl_insert, 0, 0
+	FORM MN_Vinserti64x4, xl_insert, 1, 0
+	FORM MN_Vinsertf64x4, xl_insert, 1, 0
+	# the scalar conversions and the operations the card has no instruction for (x87)
+	FORM MN_Vcvtsi2ss, xl_cvtsi2s, 0, 0
+	FORM MN_Vcvtsi2sd, xl_cvtsi2s, 1, 0
+	FORM MN_Vcvtss2sd, xl_cvtss2sd, 0, 0
+	FORM MN_Vcvtsd2ss, xl_cvtss2sd, 1, 0
+	FORM MN_Vdivss, xl_divs, 0, 0
+	FORM MN_Vdivsd, xl_divs, 1, 0
+	FORM MN_Vsqrtss, xl_sqrts, 0, 0
+	FORM MN_Vsqrtsd, xl_sqrts, 1, 0
+	# byte and word lanes the card has no mask for: synthesised in dword lanes
+	FORM MN_Vpcmpeqb, xl_cmpeqb, 0, 0
+	FORM MN_Vpcmpeqw, xl_cmpeqb, 1, 0
+	FORM MN_Vptest, xl_ptest, 0, 0
+	# the mask registers: the card has the two-operand forms
+	FORM MN_Kmovw, xl_kmov, 0, 0
+	FORM MN_Kortestw, xl_kcopy, 0x98, 0
+	FORM MN_Knotw, xl_kcopy, 0x44, 0
+	FORM MN_Kandw, xl_kbin, 0x41, 0
+	FORM MN_Kandnw, xl_kbin, 0x42, 0
+	FORM MN_Korw, xl_kbin, 0x45, 0
+	FORM MN_Kxorw, xl_kbin, 0x47, 0
+	FORM MN_Kxnorw, xl_kbin, 0x46, 0
+	FORM MN_Kunpckbw, xl_kunpck, 0, 0
+	# qword compares: dword compares packed two bits to one
+	FORM MN_Vpcmpeqq, xl_cmp_q, 0, 0
 	FORM MN_Vzeroupper, xl_nothing, 0, 0
 	FORM MN_Vzeroall, xl_zeroall, 0, 0
 xl_forms_end:
@@ -998,17 +1053,14 @@ xl_mov_unaligned:
 	jne .Lmovu_store
 	cmpl $0, 8(%rsp)
 	jne 6f
-	# an unmasked load straight into d
+	# an unmasked load straight into d, at whatever alignment
 	movq %rbx, %rdi
 	movzbl IN_REG(%r12), %esi
 	movq %r12, %rdx
 	movl 4(%rsp), %ecx
-	xorl %r8d, %r8d
+	movl %r15d, %r8d
 	xorl %r9d, %r9d
-	pushq $0
-	pushq $0
-	call em_unaligned
-	addq $16, %rsp
+	call em_unaligned_any
 	jmp 7f
 6:	# through a temporary, merged under the program mask, {z} zeroes the rest
 	movq %rbx, %rdi
@@ -1062,12 +1114,9 @@ xl_mov_unaligned:
 	movzbl IN_REG(%r12), %esi
 	movq %r12, %rdx
 	movl 4(%rsp), %ecx
-	xorl %r8d, %r8d
+	movl %r15d, %r8d
 	movl $1, %r9d
-	pushq $0
-	pushq $0
-	call em_unaligned
-	addq $16, %rsp
+	call em_unaligned_any
 	jmp .Lmovu_ok
 8:	# read, merge under the program mask, write the span back
 	movq %rbx, %rdi
@@ -2086,4 +2135,1749 @@ xl_zeroall:
 	popq %r12
 	popq %rbx
 	ret
+
+# xl_interleave: vunpckl/hps, vpunpckl/hdq, vunpckl/hpd, vpunpckl/hqdq,
+# vmovlhps, vmovhlps: per 128-bit block a vpshufd of s1 and one of s2
+# (the form's two immediates) merged under the lanes the second gives
+# (the form's mask), into a temporary, then commit (rewrite.rs
+# interleave).
+	.text
+xl_interleave:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $16, %rsp
+	LOADCTX
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	call src2
+	testl %eax, %eax
+	js .Lil_notemp
+	movl %eax, %r14d
+	jmp 2f
+1:	movzbl IN_RM(%r12), %r14d		# s2
+2:	movq %rbx, %rdi
+	call em_temp
+	testl %eax, %eax
+	js .Lil_notemp
+	movl %eax, %r15d			# r
+	movq %rbx, %rdi
+	call em_temp
+	testl %eax, %eax
+	js .Lil_notemp
+	movl %eax, (%rsp)			# t
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_REG, %edx
+	movzbl IN_VVVV(%r12), %ecx
+	movl XF_A(%r13), %r8d
+	andl $0xff, %r8d
+	xorl %r9d, %r9d
+	call xl_vpshufd
+	movq %rbx, %rdi
+	movl (%rsp), %esi
+	movl $RM_REG, %edx
+	movl %r14d, %ecx
+	movl XF_A(%r13), %r8d
+	shrl $8, %r8d
+	andl $0xff, %r8d
+	xorl %r9d, %r9d
+	call xl_vpshufd
+	movq %rbx, %rdi
+	movl XF_A(%r13), %esi
+	shrl $16, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_REG, %edx
+	movl (%rsp), %ecx
+	movl %eax, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl %r15d, %edx
+	xorl %ecx, %ecx
+	call commit
+	xorl %eax, %eax
+	jmp 9f
+.Lil_notemp:
+	leaq s_no_temp(%rip), %rax
+9:	addq $16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_comis: vcomiss/vucomiss/vcomisd/vucomisd: the flags from three
+# compares of lane 0 into the scratch mask (less: CF; equal: ZF;
+# unordered: ZF, PF and CF), composed in ecx, written to [fs:S_XFER],
+# which em_finish puts into the flags last of all (rewrite.rs comis). A
+# memory operand is the broadcast source (SSS 001).
+xl_comis:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	movl XF_B(%r13), %r14d
+	andl $XB_QWORD, %r14d
+	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	call em_k
+	movl %eax, %r15d			# ks
+	# the block: vcmpps (0F C2, pp 0 W0) or vcmppd (66 0F W1 C2); reg = ks, vvvv = s1 (IN_REG), rm = the second operand
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl %r14d, %edx
+	movl %r14d, %ecx
+	movl $0xc2, %r8d
+	movl %r15d, %r9d
+	call mv_set
+	movzbl IN_REG(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rsp, %rdi
+	movl $RM_MEM, %esi
+	movq %r12, %rdx
+	call mv_rm
+	movb $1, MV_SSS(%rsp)
+	jmp 2f
+1:	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movzbl IN_RM(%r12), %edx
+	call mv_rm
+2:	# CF: less than (predicate 1)
+	movw $1, MV_IMM(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r15d, %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_comis1(%rip), %rsi
+	movl $5, %edx
+	call em_bytes				# and eax, 1; mov ecx, eax
+	# ZF: equal (0)
+	movw $0, MV_IMM(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r15d, %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_comis2(%rip), %rsi
+	movl $8, %edx
+	call em_bytes				# and eax, 1; shl eax, 6; or ecx, eax
+	# ZF, PF, CF: unordered (3)
+	movw $3, MV_IMM(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r15d, %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_comis3(%rip), %rsi
+	movl $10, %edx
+	call em_bytes				# and eax, 1; neg eax; and eax, 0x45; or ecx, eax
+	movq %rbx, %rdi
+	movl $1, %esi
+	xorl %edx, %edx
+	movl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:S_XFER], ecx
+	movl $S_XFER, EM_FLAGS_OUT(%rbx)
+	xorl %eax, %eax
+	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+.Lb_comis1: .byte 0x83, 0xe0, 0x01, 0x89, 0xc1
+.Lb_comis2: .byte 0x83, 0xe0, 0x01, 0xc1, 0xe0, 0x06, 0x09, 0xc1
+.Lb_comis3: .byte 0x83, 0xe0, 0x01, 0xf7, 0xd8, 0x83, 0xe0, 0x45, 0x09, 0xc1
+	.text
 	.section .note.GNU-stack,"",@progbits
+
+	.text
+# xl_movq: vmovq and vmovd (XF_A 1 qword, 0 dword) between the low lane
+# of a vector register and a general register or memory: the card
+# moves nothing between the two files, so a general register goes
+# through the scratch (S_GPR). A load zeroes the destination and
+# broadcasts the element under a one-lane mask (vbroadcastsd/ss from
+# the scratch or the memory operand); a store packs the lane out
+# (vpackstoreld under the dword lanes of the element) to memory or to
+# the scratch, from where the general register is loaded last.
+# Forms: 6E (xmm from r/m), 66 7E (r/m from xmm), F3 7E (xmm from
+# xmm/m64), D6 (m64 from xmm).
+xl_movq:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	movl XF_A(%r13), %r14d			# wide
+	movzbl IN_OP(%r12), %eax
+	cmpl $0x6e, %eax
+	je .Lmq_load
+	cmpl $0xd6, %eax
+	je .Lmq_store
+	cmpl $0x7e, %eax
+	jne .Lmq_shape
+	cmpb $2, IN_PP(%r12)
+	je .Lmq_load
+.Lmq_store:
+	movl $1, %esi
+	testl %r14d, %r14d
+	jz 1f
+	movl $3, %esi
+1:	movq %rbx, %rdi
+	call em_mask_imm
+	movl %eax, %r15d			# the lanes' mask register
+	testb $H_MEM, IN_HAS(%r12)
+	jz 2f
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movq %r12, %rdx
+	movl %r15d, %ecx
+	xorl %r8d, %r8d
+	movl $1, %r9d
+	pushq $0
+	pushq $0
+	call em_unaligned
+	addq $16, %rsp
+	jmp .Lmq_ok
+2:	# vpackstoreld [fs:S_GPR]{k}, s; the general register from there, last
+	movq %rsp, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0xd0, %r8d
+	movzbl IN_REG(%r12), %r9d
+	call mv_set
+	movq %rsp, %rdi
+	movl $RM_FS, %esi
+	movl $S_GPR, %edx
+	call mv_rm
+	movb %r15b, MV_K(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	call em_gpr_result
+	jmp .Lmq_ok
+.Lmq_load:
+	testb $H_MEM, IN_HAS(%r12)
+	jnz 3f
+	cmpb $0x7e, IN_OP(%r12)
+	jne 4f
+	# xmm from xmm: the low qword kept or moved, the rest zeroed
+	movzbl IN_REG(%r12), %esi
+	cmpb IN_RM(%r12), %sil
+	jne 31f
+	movq %rbx, %rdi
+	movl $0xfffc, %edx
+	call em_zero_lanes
+	jmp .Lmq_ok
+31:	movq %rbx, %rdi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movq %rbx, %rdi
+	movl $3, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_REG, %edx
+	movzbl IN_RM(%r12), %ecx
+	movl %eax, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+	jmp .Lmq_ok
+3:	# from memory: zero, then the element broadcast under lane 0
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movq %rbx, %rdi
+	movl $1, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	movl %eax, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+	jmp .Lmq_ok
+4:	# from a general register: to the scratch, zero, the broadcast under lane 0
+	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movq %rbx, %rdi
+	movl $1, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_FS, %edx
+	movl $S_GPR, %ecx
+	movl %eax, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+.Lmq_ok:
+	xorl %eax, %eax
+	jmp .Lmq_out
+.Lmq_shape:
+	leaq s_shape(%rip), %rax
+.Lmq_out:
+	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_pinsr: vpinsrq (XF_A 1) and vpinsrd (0): d = s1 with element imm
+# replaced by the general register or memory operand, the lanes above
+# the 128 bits zeroed. The element arrives by a broadcast under the
+# element's lane (qword or dword), from the scratch for a register.
+xl_pinsr:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	LOADCTX
+	movl XF_A(%r13), %r14d			# wide
+	movq IN_IMM(%r12), %r15
+	andl $3, %r15d
+	testl %r14d, %r14d
+	jz 1f
+	andl $1, %r15d
+1:	movzbl IN_REG(%r12), %esi
+	cmpb IN_VVVV(%r12), %sil
+	je 2f
+	movq %rbx, %rdi
+	movl $RM_REG, %edx
+	movzbl IN_VVVV(%r12), %ecx
+	xorl %r8d, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+2:	movl $1, %esi
+	movl %r15d, %ecx
+	shll %cl, %esi
+	movq %rbx, %rdi
+	call em_mask_imm
+	movl %eax, %r15d			# the element's mask register
+	testb $H_MEM, IN_HAS(%r12)
+	jz 3f
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	movl %r15d, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+	jmp 4f
+3:	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_FS, %edx
+	movl $S_GPR, %ecx
+	movl %r15d, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+4:	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $0xfff0, %edx
+	call em_zero_lanes
+	xorl %eax, %eax
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_pextr: vpextrq (XF_A 1) and vpextrd (0): element imm of the vector
+# register to a general register or memory: a pack-store of the
+# element's dword lanes (packed: it lands at the address whatever its
+# lane), to memory by the unaligned pair, or to the scratch from where
+# the general register is loaded last.
+xl_pextr:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES, %rsp
+	LOADCTX
+	movl XF_A(%r13), %r14d			# wide
+	movq IN_IMM(%r12), %rcx
+	andl $3, %ecx
+	movl $1, %esi
+	testl %r14d, %r14d
+	jz 1f
+	andl $1, %ecx
+	addl %ecx, %ecx
+	movl $3, %esi
+1:	shll %cl, %esi
+	movq %rbx, %rdi
+	call em_mask_imm
+	movl %eax, %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 2f
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movq %r12, %rdx
+	movl %r15d, %ecx
+	xorl %r8d, %r8d
+	movl $1, %r9d
+	pushq $0
+	pushq $0
+	call em_unaligned
+	addq $16, %rsp
+	jmp 3f
+2:	movq %rsp, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0xd0, %r8d
+	movzbl IN_REG(%r12), %r9d
+	call mv_set
+	movq %rsp, %rdi
+	movl $RM_FS, %esi
+	movl $S_GPR, %edx
+	call mv_rm
+	movb %r15b, MV_K(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	call em_gpr_result
+3:	xorl %eax, %eax
+	addq $MV_BYTES, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_insert: vinserti32x4/vinsertf32x4/vinserti128/vinsertf128 (XF_A 0:
+# a 16-byte block) and vinserti64x4/vinsertf64x4 (1: a 32-byte half):
+# d = s1 with block imm replaced by the source's low block. The source
+# block goes into a temporary at every block position (vpermf32x4 of a
+# register, or the block broadcast of a memory operand), then a move
+# under the block's lanes; the lanes above the destination's length
+# are zeroed (commit). A masked form is not taken.
+xl_insert:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $16, %rsp
+	LOADCTX
+	cmpb $0, IN_AAA(%r12)
+	jne .Lins_shape
+	movl XF_A(%r13), %r14d			# half
+	movq IN_IMM(%r12), %rax
+	andl $3, %eax
+	testl %r14d, %r14d
+	jz 1f
+	andl $1, %eax
+1:	movl %eax, (%rsp)			# the block
+	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lins_notemp
+	movl %eax, %r15d			# the temporary
+	testb $H_MEM, IN_HAS(%r12)
+	jz 2f
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	xorl %r8d, %r8d
+	movl %r14d, %r9d
+	call em_load_block
+	jmp 3f
+2:	movl $0x44, %eax			# both halves from blocks 0 and 1
+	testl %r14d, %r14d
+	jnz 21f
+	xorl %eax, %eax				# every block from block 0
+21:	pushq $0				# k
+	pushq %rax				# imm
+	movzbl IN_RM(%r12), %eax
+	pushq %rax				# rm
+	pushq $RM_REG
+	movq %rbx, %rdi
+	movl $3, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x07, %r8d
+	movl %r15d, %r9d
+	call em_op2i
+	addq $32, %rsp
+3:	movzbl IN_REG(%r12), %esi
+	cmpb IN_VVVV(%r12), %sil
+	je 4f
+	movq %rbx, %rdi
+	movl $RM_REG, %edx
+	movzbl IN_VVVV(%r12), %ecx
+	xorl %r8d, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+4:	movl (%rsp), %ecx
+	movl $0xf, %esi
+	shll $2, %ecx
+	testl %r14d, %r14d
+	jz 41f
+	movl $0xff, %esi
+	addl %ecx, %ecx
+41:	shll %cl, %esi
+	movq %rbx, %rdi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_REG, %edx
+	movl %r15d, %ecx
+	movl %eax, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl %esi, %edx
+	xorl %ecx, %ecx
+	call commit
+	xorl %eax, %eax
+	jmp .Lins_out
+.Lins_shape:
+	leaq s_shape(%rip), %rax
+	jmp .Lins_out
+.Lins_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lins_out:
+	addq $16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+	.text
+# ---- the x87 path: what the card's vector unit cannot do exactly, its
+# core's x87 unit does on one lane staged through the scratch ----
+
+# fs_op(em rdi, bytes rsi, n edx, reg ecx, off r8d): a legacy
+# instruction (its opcode bytes) with one [fs:scratch + off] memory
+# operand, reg the ModRM extension: 64, the bytes, ModRM 04 | reg << 3,
+# SIB 25, the absolute disp32.
+fs_op:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movl %edx, %r13d
+	movl %ecx, %r14d
+	movl %r8d, %r15d
+	movl $0x64, %eax
+	call em_byte
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	movl %r13d, %edx
+	call em_bytes
+	movl %r14d, %eax
+	shll $3, %eax
+	orl $4, %eax
+	movq %rbx, %rdi
+	call em_byte
+	movl $0x25, %eax
+	movq %rbx, %rdi
+	call em_byte
+	movl EM_SCRATCH(%rbx), %eax
+	addl %r15d, %eax
+	movq %rbx, %rdi
+	call em_dword
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# lane_out(em rdi, s esi, w edx, off ecx): lane 0 of s (a dword, or a
+# qword for w) packed to [fs:scratch + off]: vpackstoreld/q under the
+# mask 1.
+lane_out:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	subq $MV_BYTES, %rsp
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	movl %edx, %r13d
+	movl %ecx, %r14d
+	movl $1, %esi
+	call em_mask_imm
+	movl %eax, %r8d
+	pushq %r8
+	movq %rsp, %rdi
+	addq $8, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	movl %r13d, %ecx
+	movl $0xd0, %r8d
+	movl %r12d, %r9d
+	call mv_set
+	popq %r8
+	movq %rsp, %rdi
+	movl $RM_FS, %esi
+	movl %r14d, %edx
+	call mv_rm
+	movb %r8b, MV_K(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	addq $MV_BYTES, %rsp
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# x87_pc(em rdi, double esi): the control word saved to S_CW and loaded
+# with the precision of the operand (24 bits, or 53 for double) from
+# S_CW2; rax and the flags are saved first (restored at the finish).
+x87_pc:
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	call em_rax
+	movq %rbx, %rdi
+	call em_flags
+	movq %rbx, %rdi
+	leaq .Lx87_d9(%rip), %rsi
+	movl $1, %edx
+	movl $7, %ecx
+	movl $S_CW, %r8d
+	call fs_op				# fnstcw [cw]
+	movq %rbx, %rdi
+	leaq .Lx87_movzx(%rip), %rsi
+	movl $2, %edx
+	xorl %ecx, %ecx
+	movl $S_CW, %r8d
+	call fs_op				# movzx eax, word [cw]
+	movq %rbx, %rdi
+	leaq .Lx87_and_ah(%rip), %rsi
+	movl $3, %edx
+	call em_bytes				# and ah, 0xfc: 24 bits
+	testl %r12d, %r12d
+	jz 1f
+	movq %rbx, %rdi
+	leaq .Lx87_or_ah(%rip), %rsi
+	movl $3, %edx
+	call em_bytes				# or ah, 2: 53 bits
+1:	movq %rbx, %rdi
+	leaq .Lx87_mov_ax(%rip), %rsi
+	movl $2, %edx
+	xorl %ecx, %ecx
+	movl $S_CW2, %r8d
+	call fs_op				# mov [cw2], ax
+	movq %rbx, %rdi
+	leaq .Lx87_d9(%rip), %rsi
+	movl $1, %edx
+	movl $5, %ecx
+	movl $S_CW2, %r8d
+	call fs_op				# fldcw [cw2]
+	popq %r12
+	popq %rbx
+	ret
+# x87_pc_back(em rdi): fldcw [cw].
+x87_pc_back:
+	leaq .Lx87_d9(%rip), %rsi
+	movl $1, %edx
+	movl $5, %ecx
+	movl $S_CW, %r8d
+	jmp fs_op
+# x87_fs(em rdi, op esi, reg edx, off ecx): one x87 instruction with an
+# fs memory operand (the opcode byte in esi).
+x87_fs:
+	subq $8, %rsp
+	movb %sil, (%rsp)
+	movq %rsp, %rsi
+	movl %ecx, %r8d
+	movl %edx, %ecx
+	movl $1, %edx
+	call fs_op
+	addq $8, %rsp
+	ret
+# scalar_in(em rdi, d esi, s1 edx, w ecx): d = [fs:S_XFER] in lane 0
+# (a broadcast under the mask 1), the rest of the 128 bits from s1, the
+# lanes above zeroed: the common ending of the x87 recipes.
+scalar_in:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	movl %edx, %r13d
+	movl %ecx, %r14d
+	movl $1, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movl %r12d, %esi
+	movl $RM_FS, %edx
+	movl $S_XFER, %ecx
+	movl %eax, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+	cmpl %r12d, %r13d
+	je 1f
+	movl $0xe, %esi
+	testl %r14d, %r14d
+	jz 2f
+	movl $2, %esi
+2:	movq %rbx, %rdi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movl %r12d, %esi
+	movl $RM_REG, %edx
+	movl %r13d, %ecx
+	movl %eax, %r8d
+	movl %r14d, %r9d
+	call em_vmov
+1:	movq %rbx, %rdi
+	movl %r12d, %esi
+	movl $0xfff0, %edx
+	call em_zero_lanes
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+.Lx87_d9:	.byte 0xd9
+.Lx87_movzx:	.byte 0x0f, 0xb7
+.Lx87_and_ah:	.byte 0x80, 0xe4, 0xfc
+.Lx87_or_ah:	.byte 0x80, 0xcc, 0x02
+.Lx87_mov_ax:	.byte 0x66, 0x89
+.Lx87_fsqrt:	.byte 0xd9, 0xfa
+	.text
+
+# xl_cvtsi2s: vcvtsi2ss (XF_A 0) and vcvtsi2sd (1) from a general
+# register: the integer to S_XFER as a qword (sign-extended when 32
+# bits), fild, fstp at the width (the one rounding), then the lane
+# in. A memory source is not taken yet.
+xl_cvtsi2s:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $16, %rsp
+	LOADCTX
+	movl XF_A(%r13), %r14d			# double
+	testb $H_MEM, IN_HAS(%r12)
+	jnz .Lcvtsi_mem
+	cmpb $0, IN_W(%r12)
+	je 1f
+	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl $1, %edx
+	movl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+	jmp 2f
+1:	# movsxd rax, r32; the qword to the slot
+	movq %rbx, %rdi
+	call em_rax
+	movzbl IN_RM(%r12), %eax
+	movl %eax, %ecx
+	shrl $3, %ecx
+	andl $1, %ecx
+	orl $0x48, %ecx
+	movb %cl, (%rsp)
+	movb $0x63, 1(%rsp)
+	andl $7, %eax
+	orl $0xc0, %eax
+	movb %al, 2(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	movl $3, %edx
+	call em_bytes
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	movl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+2:	movq %rbx, %rdi
+	movl $0xdf, %esi
+	movl $5, %edx
+	movl $S_XFER, %ecx
+	call x87_fs				# fild qword [xfer]
+	movl $0xd9, %esi			# fstp dword
+	testl %r14d, %r14d
+	jz 3f
+	movl $0xdd, %esi			# fstp qword
+3:	movq %rbx, %rdi
+	movl $3, %edx
+	movl $S_XFER, %ecx
+	call x87_fs
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movzbl IN_VVVV(%r12), %edx
+	movl %r14d, %ecx
+	call scalar_in
+	xorl %eax, %eax
+	jmp .Lcvtsi_out
+.Lcvtsi_mem:
+	leaq s_scalar_mem(%rip), %rax
+.Lcvtsi_out:
+	addq $16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_cvtss2sd: vcvtss2sd (XF_A 0: the card's vcvtps2pd, MVEX.512.0F.W0
+# 5A) and vcvtsd2ss (1: vcvtpd2ps, MVEX.512.66.0F.W1 5A) through a
+# temporary, lane 0 into d, the rest of the 128 bits from s1, the lanes
+# above zeroed. A memory source is broadcast into a temporary first.
+xl_cvtss2sd:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES, %rsp
+	LOADCTX
+	movl XF_A(%r13), %r14d			# from double
+	movzbl IN_RM(%r12), %r15d		# the source
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lcvtss_notemp
+	movl %eax, %r15d
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	xorl %r8d, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+1:	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lcvtss_notemp
+	movl %eax, %r13d			# the converted vector (the form is no longer needed)
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl %r14d, %edx
+	movl %r14d, %ecx
+	movl $0x5a, %r8d
+	movl %r13d, %r9d
+	call mv_set
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl %r15d, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	# d = lane 0 of the temporary at the result width, s1 beside it
+	movl $1, %ecx
+	subl %r14d, %ecx			# the result's width: 1 (double) from single, 0 from double
+	movl %ecx, 8(%rsp)
+	movq %rbx, %rdi
+	movl $1, %esi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_REG, %edx
+	movl %r13d, %ecx
+	movl %eax, %r8d
+	movl 8(%rsp), %r9d
+	call em_vmov
+	movzbl IN_REG(%r12), %esi
+	cmpb IN_VVVV(%r12), %sil
+	je 2f
+	movl $0xe, %esi
+	cmpl $0, 8(%rsp)
+	je 21f
+	movl $2, %esi
+21:	movq %rbx, %rdi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_REG, %edx
+	movzbl IN_VVVV(%r12), %ecx
+	movl %eax, %r8d
+	movl 8(%rsp), %r9d
+	call em_vmov
+2:	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $0xfff0, %edx
+	call em_zero_lanes
+	xorl %eax, %eax
+	jmp .Lcvtss_out
+.Lcvtss_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lcvtss_out:
+	addq $MV_BYTES, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_divs: vdivss (XF_A 0) and vdivsd (1): the two lanes to the scratch,
+# x87 fdiv under the operand's precision (one rounding), the quotient
+# back into lane 0 of d. The card has no division; the x87 quotient is
+# the correctly rounded one (a denormal result may round twice).
+xl_divs:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	LOADCTX
+	movl XF_A(%r13), %r14d			# double
+	movq %rbx, %rdi
+	movzbl IN_VVVV(%r12), %esi
+	movl %r14d, %edx
+	movl $S_XFER, %ecx
+	call lane_out				# the dividend
+	movzbl IN_RM(%r12), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Ldivs_notemp
+	movl %eax, %r15d
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	xorl %r8d, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+1:	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl %r14d, %edx
+	movl $S_XFER + 8, %ecx
+	call lane_out				# the divisor
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	call x87_pc
+	movl $0xd9, %r13d			# fld dword, fdiv dword, fstp dword
+	movl $0xd8, %r15d
+	testl %r14d, %r14d
+	jz 2f
+	movl $0xdd, %r13d			# fld qword, fdiv qword, fstp qword
+	movl $0xdc, %r15d
+2:	movq %rbx, %rdi
+	movl %r13d, %esi
+	xorl %edx, %edx
+	movl $S_XFER, %ecx
+	call x87_fs
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $6, %edx
+	movl $S_XFER + 8, %ecx
+	call x87_fs
+	movq %rbx, %rdi
+	movl %r13d, %esi
+	movl $3, %edx
+	movl $S_XFER, %ecx
+	call x87_fs
+	movq %rbx, %rdi
+	call x87_pc_back
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movzbl IN_VVVV(%r12), %edx
+	movl %r14d, %ecx
+	call scalar_in
+	xorl %eax, %eax
+	jmp .Ldivs_out
+.Ldivs_notemp:
+	leaq s_no_temp(%rip), %rax
+.Ldivs_out:
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_sqrts: vsqrtss (XF_A 0) and vsqrtsd (1): the source lane to the
+# scratch, x87 fsqrt under the operand's precision, back into lane 0
+# of d, the rest from s1.
+xl_sqrts:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	LOADCTX
+	movl XF_A(%r13), %r14d
+	movzbl IN_RM(%r12), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lsqrts_notemp
+	movl %eax, %r15d
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl $RM_MEM, %edx
+	movq %r12, %rcx
+	xorl %r8d, %r8d
+	movl %r14d, %r9d
+	call em_broadcast
+1:	movq %rbx, %rdi
+	movl %r15d, %esi
+	movl %r14d, %edx
+	movl $S_XFER, %ecx
+	call lane_out
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	call x87_pc
+	movl $0xd9, %r13d
+	testl %r14d, %r14d
+	jz 2f
+	movl $0xdd, %r13d
+2:	movq %rbx, %rdi
+	movl %r13d, %esi
+	xorl %edx, %edx
+	movl $S_XFER, %ecx
+	call x87_fs				# fld
+	movq %rbx, %rdi
+	leaq .Lx87_fsqrt(%rip), %rsi
+	movl $2, %edx
+	call em_bytes				# fsqrt
+	movq %rbx, %rdi
+	movl %r13d, %esi
+	movl $3, %edx
+	movl $S_XFER, %ecx
+	call x87_fs				# fstp
+	movq %rbx, %rdi
+	call x87_pc_back
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movzbl IN_VVVV(%r12), %edx
+	movl %r14d, %ecx
+	call scalar_in
+	xorl %eax, %eax
+	jmp .Lsqrts_out
+.Lsqrts_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lsqrts_out:
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+	.text
+# xl_cmpeqb: vpcmpeqb (XF_A 0) and vpcmpeqw (1), VEX forms: the card
+# masks dword lanes only, so the per-byte (per-word) equality is made
+# in dword arithmetic: t = s1 ^ s2; u = ((t & 0x7f..) + 0x7f..) | t has
+# the top bit of every element set when the element is not zero; d =
+# ((~u & 0x80..) >> 7) * 0xff is 0xff in every equal element (0xffff for
+# words: 0x7fff, 0x8000, 15, 0xffff). The lanes above the length zeroed.
+xl_cmpeqb:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 32, %rsp
+	LOADCTX
+	movl XF_A(%r13), %r14d			# words
+	# the second source as a register
+	movzbl IN_RM(%r12), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	call src2
+	testl %eax, %eax
+	js .Lceq_notemp
+	movl %eax, %r15d
+1:	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lceq_notemp
+	movl %eax, MV_BYTES(%rsp)		# t
+	# the constants
+	movl $0x7f7f7f7f, %esi
+	movl $0x80808080, %r8d
+	movl $0xff, %r9d
+	movl $7, %r10d
+	testl %r14d, %r14d
+	jz 2f
+	movl $0x7fff7fff, %esi
+	movl $0x80008000, %r8d
+	movl $0xffff, %r9d
+	movl $15, %r10d
+2:	movl %r10d, MV_BYTES + 28(%rsp)	# the shift
+	pushq %r8
+	pushq %r9
+	movq %rbx, %rdi
+	call em_const_dw
+	movl %eax, MV_BYTES + 8 + 16(%rsp)	# c7f (the frame moved by 16)
+	popq %r9
+	popq %r8
+	pushq %r9
+	movq %rbx, %rdi
+	movl %r8d, %esi
+	call em_const_dw
+	movl %eax, MV_BYTES + 12 + 8(%rsp)	# c80
+	popq %r9
+	movq %rbx, %rdi
+	movl %r9d, %esi
+	call em_const_dw
+	movl %eax, MV_BYTES + 16(%rsp)		# cff
+	cmpl $-1, MV_BYTES + 8(%rsp)
+	je .Lceq_notemp
+	cmpl $-1, MV_BYTES + 12(%rsp)
+	je .Lceq_notemp
+	cmpl $-1, MV_BYTES + 16(%rsp)
+	je .Lceq_notemp
+	# t = s1 ^ s2
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0xef, %r8d
+	xorl %r9d, %r9d
+	call mv_set
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movl MV_BYTES + 16(%rsp), %edx		# t
+	movzbl IN_VVVV(%r12), %ecx
+	movl $RM_REG, %r8d
+	movl %r15d, %r9d
+	call em_op3
+	addq $16, %rsp
+	# d = t & c7f
+	movb $0xdb, MV_OP(%rsp)
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movzbl IN_REG(%r12), %edx
+	movl MV_BYTES + 16(%rsp), %ecx		# t
+	movl $RM_CONST, %r8d
+	movl MV_BYTES + 8 + 16(%rsp), %r9d	# c7f
+	call em_op3
+	addq $16, %rsp
+	# d = d + c7f
+	movb $0xfe, MV_OP(%rsp)
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movzbl IN_REG(%r12), %edx
+	movl %edx, %ecx
+	movl $RM_CONST, %r8d
+	movl MV_BYTES + 8 + 16(%rsp), %r9d
+	call em_op3
+	addq $16, %rsp
+	# d = d | t
+	movb $0xeb, MV_OP(%rsp)
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movzbl IN_REG(%r12), %edx
+	movl %edx, %ecx
+	movl $RM_REG, %r8d
+	movl MV_BYTES + 16(%rsp), %r9d		# t
+	call em_op3
+	addq $16, %rsp
+	# d = ~d & c80
+	movb $0xdf, MV_OP(%rsp)
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movzbl IN_REG(%r12), %edx
+	movl %edx, %ecx
+	movl $RM_CONST, %r8d
+	movl MV_BYTES + 12 + 16(%rsp), %r9d	# c80
+	call em_op3
+	addq $16, %rsp
+	# d = d >> shift (vpsrld: 66.0F 72 /2 ib, the destination in vvvv)
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x72, %r8d
+	movl $2, %r9d
+	call mv_set
+	movzbl IN_REG(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movzbl IN_REG(%r12), %edx
+	call mv_rm
+	movl MV_BYTES + 28(%rsp), %eax
+	movw %ax, MV_IMM(%rsp)
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	# d = d * cff (vpmulld 66.0F38 40)
+	movq %rsp, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x40, %r8d
+	xorl %r9d, %r9d
+	call mv_set
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movzbl IN_REG(%r12), %edx
+	movl %edx, %ecx
+	movl $RM_CONST, %r8d
+	movl MV_BYTES + 16 + 16(%rsp), %r9d	# cff
+	call em_op3
+	addq $16, %rsp
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl %esi, %edx
+	xorl %ecx, %ecx
+	call commit
+	xorl %eax, %eax
+	jmp .Lceq_out
+.Lceq_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lceq_out:
+	addq $MV_BYTES + 32, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_ptest: vptest a, b/m (VEX): ZF = (a & b) == 0, CF = (~a & b) == 0,
+# the other flags cleared, over the length's lanes (the lanes above a
+# narrow register are zero already). vptestmd (MVEX.NDS.512.66.0F38.W0
+# 27) into the scratch mask, kmov, test; the flags byte to S_XFER as
+# the scalar compares do (EM_FLAGS_OUT).
+xl_ptest:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	movzbl IN_RM(%r12), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	call src2
+	testl %eax, %eax
+	js .Lptest_notemp
+	movl %eax, %r15d
+1:	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	call em_k
+	movl %eax, %r14d			# the scratch mask
+	# k = (a & b) != 0 per lane
+	movq %rsp, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x27, %r8d
+	movl %r14d, %r9d
+	call mv_set
+	movzbl IN_REG(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl %r15d, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r14d, %edx
+	call em_kmov_r_k			# eax = k
+	movq %rbx, %rdi
+	leaq .Lb_ptest1(%rip), %rsi
+	movl $11, %edx
+	call em_bytes				# test eax, eax; sete cl; movzx ecx, cl; shl ecx, 6
+	# the temporary t = ~a & b; k = t != 0
+	movq %rbx, %rdi
+	call em_temp
+	cmpl $-1, %eax
+	je .Lptest_notemp
+	movl %eax, MV_BYTES(%rsp)
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0xdf, %r8d
+	xorl %r9d, %r9d
+	call mv_set
+	pushq $-1
+	pushq $0
+	movq %rbx, %rdi
+	leaq 16(%rsp), %rsi
+	movl MV_BYTES + 16(%rsp), %edx
+	movzbl IN_REG(%r12), %ecx
+	movl $RM_REG, %r8d
+	movl %r15d, %r9d
+	call em_op3
+	addq $16, %rsp
+	movq %rsp, %rdi
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x27, %r8d
+	movl %r14d, %r9d
+	call mv_set
+	movl MV_BYTES(%rsp), %eax
+	movb %al, MV_VVVV(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl MV_BYTES(%rsp), %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r14d, %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_ptest2(%rip), %rsi
+	movl $10, %edx
+	call em_bytes				# test eax, eax; sete al; movzx eax, al; or ecx, eax
+	movq %rbx, %rdi
+	movl $1, %esi
+	xorl %edx, %edx
+	movl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:S_XFER], ecx
+	movl $S_XFER, EM_FLAGS_OUT(%rbx)
+	xorl %eax, %eax
+	jmp .Lptest_out
+.Lptest_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lptest_out:
+	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+.Lb_ptest1: .byte 0x85, 0xc0, 0x0f, 0x94, 0xc1, 0x0f, 0xb6, 0xc9, 0xc1, 0xe1, 0x06
+.Lb_ptest2: .byte 0x85, 0xc0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0x09, 0xc1
+	.text
+
+	.text
+# xl_kcopy: kortestw (XF_A 0x98) and knotw (0x44): the card's form is the
+# same two-register VEX instruction (kortest sets ZF and CF as the
+# program expects; nothing after it in the sequence touches the flags).
+xl_kcopy:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	LOADCTX
+	movq %rbx, %rdi
+	movl XF_A(%r13), %esi
+	movzbl IN_REG(%r12), %edx
+	movzbl IN_RM(%r12), %ecx
+	call em_vexk
+	xorl %eax, %eax
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_kbin: kandw/kandnw/korw/kxorw/kxnorw k1, k2, k3 (XF_A the card's
+# two-operand opcode): k1 = k2 op k3 as a move and the two-operand form
+# (k1 = k1 op k3); when k1 is k3 and the operation is symmetric the
+# operands swap; kandn with k1 = k3 goes through the scratch mask.
+xl_kbin:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	LOADCTX
+	movzbl IN_REG(%r12), %r14d		# k1
+	movzbl IN_VVVV(%r12), %r15d		# k2
+	movzbl IN_RM(%r12), %ecx		# k3
+	cmpl %r14d, %r15d
+	je 2f
+	cmpl %r14d, %ecx
+	jne 1f
+	# k1 == k3
+	cmpl $0x42, XF_A(%r13)
+	je 3f
+	movl %r15d, %ecx			# symmetric: k1 = k1 op k2
+	jmp 2f
+1:	pushq %rcx
+	movq %rbx, %rdi
+	movl $0x90, %esi
+	movl %r14d, %edx
+	movl %r15d, %ecx
+	call em_vexk				# kmov k1, k2
+	popq %rcx
+2:	movq %rbx, %rdi
+	movl XF_A(%r13), %esi
+	movl %r14d, %edx
+	call em_vexk				# k1 = k1 op k3
+	jmp 9f
+3:	# kandn k1, k2, k1: t = k2; t = ~t & k1 (kandn t, k1); k1 = t
+	movq %rbx, %rdi
+	call em_k
+	movl %eax, %r13d
+	movq %rbx, %rdi
+	movl $0x90, %esi
+	movl %r13d, %edx
+	movl %r15d, %ecx
+	call em_vexk
+	movq %rbx, %rdi
+	movl $0x42, %esi
+	movl %r13d, %edx
+	movl %r14d, %ecx
+	call em_vexk
+	movq %rbx, %rdi
+	movl $0x90, %esi
+	movl %r14d, %edx
+	movl %r13d, %ecx
+	call em_vexk
+9:	xorl %eax, %eax
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_kunpck: kunpckbw k1, k2, k3: k1 = k2[7:0] << 8 | k3[7:0], through
+# eax and ecx.
+xl_kunpck:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	LOADCTX
+	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movzbl IN_VVVV(%r12), %edx
+	call em_kmov_r_k			# eax = k2
+	movq %rbx, %rdi
+	movl $1, %esi
+	movzbl IN_RM(%r12), %edx
+	call em_kmov_r_k			# ecx = k3
+	movq %rbx, %rdi
+	leaq .Lb_kunpck(%rip), %rsi
+	movl $11, %edx
+	call em_bytes				# shl eax, 8; movzx ecx, cl; or eax, ecx; movzx eax, ax
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	call em_kmov_k_r
+	xorl %eax, %eax
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_kmov: kmovw: 90 k, k/m16; 91 m16, k; 92 k, r32; 93 r32, k. The
+# register forms are the card's own; the memory forms go through eax
+# with the address in rcx (em_lea).
+xl_kmov:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	LOADCTX
+	movzbl IN_OP(%r12), %r14d
+	testb $H_MEM, IN_HAS(%r12)
+	jnz 1f
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	movzbl IN_REG(%r12), %edx
+	movzbl IN_RM(%r12), %ecx
+	call em_vexk
+	jmp 9f
+1:	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	call em_addr_regs
+	movq %rbx, %rdi
+	movl $1, %esi
+	movq %r12, %rdx
+	call em_lea				# lea rcx, [m]
+	cmpl $0x91, %r14d
+	je 2f
+	# k = [m]: movzx eax, word [rcx]; kmov k, eax
+	movq %rbx, %rdi
+	leaq .Lb_movzx_w_rcx(%rip), %rsi
+	movl $3, %edx
+	call em_bytes
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	call em_kmov_k_r
+	jmp 9f
+2:	# [m] = k: kmov eax, k; mov [rcx], ax
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movzbl IN_REG(%r12), %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_mov_rcx_ax(%rip), %rsi
+	movl $3, %edx
+	call em_bytes
+9:	xorl %eax, %eax
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_cmp_q: vpcmpeqq: the qword equality from the dword compare under
+# the length's lanes, the mask's bit pairs packed to one bit a qword in
+# eax, the program's mask applied; into the mask register (EVEX) or,
+# for the VEX form, spread back to dword lanes and the register set
+# to all ones there, zero elsewhere.
+xl_cmp_q:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	movzbl IN_RM(%r12), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz 1f
+	movq %rbx, %rdi
+	movl $1, %esi
+	xorl %edx, %edx
+	call src2
+	testl %eax, %eax
+	js .Lcq_notemp
+	movl %eax, %r15d
+1:	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	EV_LL %edi
+	movl $1, %esi
+	call vl_lanes				# the qword lanes of the length
+	movl %eax, MV_BYTES(%rsp)		# the qword lane mask
+	movl %eax, %edi
+	# the dword lanes: every qword lane twice
+	movl %eax, %edx
+	andl $0x5555, %eax
+	movl %edx, %ecx
+	shll $1, %ecx
+	andl $0xaaaa, %ecx
+	# (a qword mask bit i to dword bits 2i, 2i+1: spread)
+	movl %edi, %eax
+	xorl %ecx, %ecx
+	xorl %edx, %edx
+11:	cmpl $8, %ecx
+	jae 12f
+	btl %ecx, %eax
+	jnc 13f
+	movl %ecx, %esi
+	addl %esi, %esi
+	btsl %esi, %edx
+	incl %esi
+	btsl %esi, %edx
+13:	incl %ecx
+	jmp 11b
+12:	movq %rbx, %rdi
+	movl %edx, %esi
+	call em_mask_imm			# the scratch mask = the dword lanes
+	movl %eax, %r14d
+	# vpcmpeqd ks{ks}, s1, s2
+	movq %rsp, %rdi
+	movl $1, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x76, %r8d
+	movl %r14d, %r9d
+	call mv_set
+	movzbl IN_VVVV(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	movb %r14b, MV_K(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl %r15d, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r14d, %edx
+	call em_kmov_r_k			# eax = the dword mask
+	movq %rbx, %rdi
+	leaq .Lb_pack2(%rip), %rsi
+	movl $46, %edx
+	call em_bytes				# eax = one bit a qword
+	cmpb $0, IN_AAA(%r12)
+	je 2f
+	movq %rbx, %rdi
+	movl $1, %esi
+	movzbl IN_AAA(%r12), %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi
+	leaq .Lb_and_eax_ecx(%rip), %rsi
+	movl $2, %edx
+	call em_bytes
+2:	cmpb $2, IN_ENC(%r12)
+	jne 3f
+	# EVEX: into the mask register
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	call em_kmov_k_r
+	jmp .Lcq_ok
+3:	# VEX: the register: the qword bits spread to dword lanes, all ones there
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	xorl %edx, %edx
+	call em_kmov_k_r			# ks = the qword mask
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	movl $0xffff, %edx
+	call em_qmask_to_dmask
+	movl %eax, %r14d
+	movq %rbx, %rdi
+	movl $-1, %esi
+	call em_const_dw
+	cmpl $-1, %eax
+	je .Lcq_notemp
+	movl %eax, MV_BYTES + 8(%rsp)
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_CONST, %edx
+	movl MV_BYTES + 8(%rsp), %ecx
+	movl %r14d, %r8d
+	xorl %r9d, %r9d
+	call em_vmov
+.Lcq_ok:
+	xorl %eax, %eax
+	jmp .Lcq_out
+.Lcq_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lcq_out:
+	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+.Lb_kunpck: .byte 0xc1, 0xe0, 0x08, 0x0f, 0xb6, 0xc9, 0x09, 0xc8, 0x0f, 0xb7, 0xc0
+.Lb_movzx_w_rcx: .byte 0x0f, 0xb7, 0x01
+.Lb_mov_rcx_ax: .byte 0x66, 0x89, 0x01
+	# mov ecx,eax; shr ecx,1; and eax,ecx; and eax,0x5555; mov ecx,eax; shr ecx,1; or eax,ecx; and eax,0x3333;
+	# mov ecx,eax; shr ecx,2; or eax,ecx; and eax,0x0f0f; mov ecx,eax; shr ecx,4; or eax,ecx; and eax,0x00ff
+.Lb_pack2: .byte 0x89, 0xc1, 0xd1, 0xe9, 0x21, 0xc8, 0x25, 0x55, 0x55, 0x00, 0x00
+	.byte 0x89, 0xc1, 0xd1, 0xe9, 0x09, 0xc8, 0x25, 0x33, 0x33, 0x00, 0x00
+	.byte 0x89, 0xc1, 0xc1, 0xe9, 0x02, 0x09, 0xc8, 0x25, 0x0f, 0x0f, 0x00, 0x00
+	.byte 0x89, 0xc1, 0xc1, 0xe9, 0x04, 0x09, 0xc8, 0x25, 0xff, 0x00, 0x00, 0x00
+.Lb_and_eax_ecx: .byte 0x21, 0xc8
+	.text

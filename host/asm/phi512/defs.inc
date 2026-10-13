@@ -119,6 +119,7 @@
 	.set SD_NINSN, 160
 	.set SD_REFUSED, 168			# 1: the translation was refused (not tried again)
 	.set SD_BYTES, 192
+	.set SEEDS_DYN_MAX, 1024		# dynamic seeds the table has room for after the static ones
 # Residency by 64 KiB units: a chunk's entry keeps which units the card
 # holds (RE_FILLED, 32 bits); a need is a chunk and the units a stripe
 # reads (0 for a chunk it only writes: the page without a fill).
@@ -141,3 +142,15 @@
 	.set CD_PEND_ADDR, 104
 	.set CD_PEND_LEN, 112
 	.set CD_POSTED, 120
+
+# The loaded-object table of elf.S (obj_at): an entry per executable or
+# shared object a fault has landed in.
+	.set OBJ_MAX, 64
+	.set OBJ_BASE, 0			# the load base
+	.set OBJ_MAP, 8				# the file mapped whole (its symbol table)
+	.set OBJ_LEN, 16
+	.set OBJ_LO, 24				# the span of its mappings
+	.set OBJ_HI, 32
+	.set OBJ_PATH, 40			# the path, NUL-terminated
+	.set OBJ_PATH_CAP, 256
+	.set OBJ_BYTES, 320

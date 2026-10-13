@@ -19,6 +19,7 @@
 file_in:	.skip 4096			# the register file sent (REGS_BYTES)
 stripe_lo:	.skip MAX_CARDS * 8
 stripe_hi:	.skip MAX_CARDS * 8
+	.globl need_q, need_n, need_i, need_overflow
 need_q:	.skip MAX_CARDS * NEED_MAX * NQ_BYTES
 need_n:	.skip MAX_CARDS * 8
 need_i:	.skip MAX_CARDS * 8
@@ -34,6 +35,8 @@ cur_entry:	.skip 8				# the blob offset the current call enters at
 	.section .rodata
 s_unknown1:	.asciz "phi512: SIGILL at "
 s_unknown2:	.asciz " is not inside a seeded function: no blob for it (the program dies as it would have)"
+s_unknown3:	.asciz "phi512:   the address is in "
+s_unknown4:	.asciz " at file offset "
 s_fail1:	.asciz "phi512: card "
 s_fail2:	.asciz " refused an instance of "
 s_fail3:	.asciz ": status "
@@ -90,6 +93,21 @@ phi512_sigill:
 	cmpq $-1, %rax
 	je .Lunknown
 	movq %rax, cur_entry(%rip)
+	# a seed without a plan (every function found at a fault): the region path
+	cmpl $OPK_NONE, SD_OPS + OP_KIND(%r13)
+	jne 0f
+	cmpq $0, handblobs(%rip)
+	jne 0f
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	movq %rax, %rdx
+	call region_run
+	testl %eax, %eax
+	jz .Lout
+	movl %eax, 24(%rsp)
+	movq $0, 32(%rsp)
+	jmp .Lfailed_card
+0:
 	leaq file_in(%rip), %rdi
 	movq %rbx, %rsi
 	call file_from_frame
@@ -337,6 +355,23 @@ phi512_sigill:
 	call w_str
 	movl $2, %edi
 	call l_end
+	movq %r12, %rdi
+	call obj_at
+	testq %rax, %rax
+	jz .Ldie
+	movq %rax, %r13
+	call l_begin
+	leaq s_unknown3(%rip), %rsi
+	call w_str
+	leaq OBJ_PATH(%r13), %rsi
+	call w_str
+	leaq s_unknown4(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	subq OBJ_BASE(%r13), %rdi
+	call w_hexn
+	movl $2, %edi
+	call l_end
 	jmp .Ldie
 .Lfailed_card:
 	movq failed_card(%rip), %rax
@@ -445,7 +480,9 @@ seed_of:
 3:	addq $SD_BYTES, %rbx
 	incq %r13
 	jmp 1b
-8:	xorl %eax, %eax
+8:	# not a static seed: the executable's function at rip, as a dynamic seed (xlfn.S)
+	movq %r12, %rdi
+	call seed_dyn_add
 	popq %r13
 	popq %rbx
 	ret
@@ -458,6 +495,7 @@ seed_of:
 # integers and flags from the frame, xmm0..15 and their ymm halves from
 # the FXSAVE/XSAVE area, the upper 256 bits of every zmm and zmm16..31
 # zero (the host has none), the masks zero.
+	.globl file_from_frame
 file_from_frame:
 	pushq %rbx
 	pushq %r12
@@ -648,6 +686,7 @@ stripe_needs:
 
 # need_add(card index rdi, chunk rsi, units edx, class ecx): into the
 # card's queue, merged with an entry for the same chunk.
+	.globl need_add
 need_add:
 	movq %rdi, %rax
 	imulq $NEED_MAX * NQ_BYTES, %rax, %rax
@@ -684,6 +723,7 @@ need_add:
 # resident_rounds: while a card has needs queued, one K_RESIDENT per
 # card posted, then each waited for; eax 0, else the status with the
 # card in failed_card.
+	.globl resident_rounds
 resident_rounds:
 	pushq %rbx
 	pushq %r12
@@ -857,6 +897,7 @@ push_rounds:
 	ret
 
 # w_us(rdi ns): the nanoseconds as microseconds, appended.
+	.globl w_us
 w_us:
 	movq %rdi, %rax
 	xorl %edx, %edx

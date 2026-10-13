@@ -32,9 +32,32 @@ fexec_threads:	.skip 8			# PHI512_THREADS: card threads an instance may split ov
 
 	.section .rodata
 s_env_cards:	.asciz "PHI512_CARDS"
+	.bss
+	.globl fill_last_slot, fill_last_off, fill_last_len
+fill_last_slot:	.skip 8
+fill_last_off:	.skip 8
+fill_last_len:	.skip 8
+	.globl fill_last_prediff
+fill_last_prediff:	.skip 8
+fill_last_copied:	.skip 8
+fill_last_copied2:	.skip 8
+fill_last_stagep:	.skip 8
+fill_last_first:	.skip 8
+fill_probe_buf:	.skip 65536
+	.section .rodata
 s_env_card:	.asciz "PHI512_CARD"
 s_env_slot:	.asciz "PHI512_SLOT"
 s_env_threads:	.asciz "PHI512_THREADS"
+s_fp1:	.asciz "phi512: fill chunk "
+s_fp2:	.asciz " slot "
+s_fp3:	.asciz " off "
+s_fp4:	.asciz " len "
+s_fp5:	.asciz ": copied "
+s_fp6:	.asciz " bytes, the probe copy "
+s_fp7:	.asciz "; words differing "
+s_fp8:	.asciz ", first at +"
+s_fp9:	.asciz ": staging "
+s_fp10:	.asciz " probe "
 s_open1:	.asciz "phi512: card "
 s_open2:	.asciz ": no window (is the card up?)"
 s_open3:	.asciz ": no worker polling"
@@ -265,6 +288,16 @@ card_load_seed:
 	call card_wait
 	testl %eax, %eax
 	jnz 8f
+	# the blob's card address, per seed and card (region.S enters by offset)
+	movq CD_SLOTP(%rbx), %rcx
+	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %rdx
+	movq %r12, %rcx
+	shlq $7, %rcx				# MAX_CARDS * 8 bytes a seed
+	movq CD_INDEX(%rbx), %rax
+	leaq (%rcx,%rax,8), %rcx
+	leaq cblob_tab(%rip), %rax
+	movq %rdx, (%rax,%rcx)
+	xorl %eax, %eax				# the return: loaded
 	cmpq $0, verbose(%rip)
 	je 8f
 	pushq %rax
@@ -423,6 +456,93 @@ card_resident_post:
 	call copy_mapped
 	popq %r9
 	popq %r8
+	movq %r15, fill_last_slot(%rip)		# (a probe: the last fill's staging slot, offset and bytes)
+	movq %r8, fill_last_off(%rip)
+	movq %r9, fill_last_len(%rip)
+	# (probe) the staged bytes against a second copy of the program's memory, before the post
+	cmpq $0, verbose(%rip)
+	je 79f
+	pushq %r8
+	pushq %r9
+	movq %rax, fill_last_copied(%rip)	# copy_mapped's count for the staging
+	leaq fill_probe_buf(%rip), %rdi
+	leaq (%r12,%r8), %rsi
+	movl $65536, %edx
+	call copy_mapped
+	movq %rax, fill_last_copied2(%rip)
+	movq fill_last_slot(%rip), %rdi
+	shlq $21, %rdi
+	addq $OFF_RESIDENT, %rdi
+	addq CD_BASE(%rbx), %rdi
+	addq fill_last_off(%rip), %rdi
+	movq %rdi, fill_last_stagep(%rip)
+	leaq fill_probe_buf(%rip), %rsi
+	xorl %ecx, %ecx
+	xorl %edx, %edx
+	movq $-1, fill_last_first(%rip)
+71:	movq (%rdi,%rcx), %rax
+	cmpq (%rsi,%rcx), %rax
+	je 72f
+	incq %rdx
+	cmpq $-1, fill_last_first(%rip)
+	jne 72f
+	movq %rcx, fill_last_first(%rip)
+72:	addq $8, %rcx
+	cmpq $65536, %rcx
+	jb 71b
+	movq %rdx, fill_last_prediff(%rip)
+	call l_begin
+	leaq s_fp1(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	call w_hexn
+	leaq s_fp2(%rip), %rsi
+	call w_str
+	movq fill_last_slot(%rip), %rdi
+	call w_dec
+	leaq s_fp3(%rip), %rsi
+	call w_str
+	movq fill_last_off(%rip), %rdi
+	call w_hexn
+	leaq s_fp4(%rip), %rsi
+	call w_str
+	movq fill_last_len(%rip), %rdi
+	call w_hexn
+	leaq s_fp5(%rip), %rsi
+	call w_str
+	movq fill_last_copied(%rip), %rdi
+	call w_dec
+	leaq s_fp6(%rip), %rsi
+	call w_str
+	movq fill_last_copied2(%rip), %rdi
+	call w_dec
+	leaq s_fp7(%rip), %rsi
+	call w_str
+	movq fill_last_prediff(%rip), %rdi
+	call w_dec
+	leaq s_fp8(%rip), %rsi
+	call w_str
+	movq fill_last_first(%rip), %rdi
+	call w_hexn
+	cmpq $-1, fill_last_first(%rip)
+	je 78f
+	leaq s_fp9(%rip), %rsi
+	call w_str
+	movq fill_last_stagep(%rip), %rdi
+	addq fill_last_first(%rip), %rdi
+	movq (%rdi), %rdi
+	call w_hexn
+	leaq s_fp10(%rip), %rsi
+	call w_str
+	leaq fill_probe_buf(%rip), %rdi
+	addq fill_last_first(%rip), %rdi
+	movq (%rdi), %rdi
+	call w_hexn
+78:	movl $2, %edi
+	call l_end
+	popq %r9
+	popq %r8
+79:
 	addq %r9, stat_resident_bytes(%rip)
 	incq stat_resident(%rip)
 2:	pushq %r8
@@ -504,12 +624,15 @@ card_fexec_post:
 	movq %rdx, %rsi
 	movl $REGS_BYTES, %edx
 	call mem_copy
+	cmpl $0, SD_STEP(%r12)
+	je 1f					# no split: the file as it is (a seed without a plan names no registers)
 	movq CD_DATAP(%rbx), %rdi
 	addq $SD_REGS_IN, %rdi
 	movl SD_IND(%r12), %eax
 	movq %r14, REGS_GPR(%rdi,%rax,8)
 	movl SD_BOUND(%r12), %eax
 	movq %r15, REGS_GPR(%rdi,%rax,8)
+1:
 	movq %rbx, %rdi
 	call card_clear_request
 	movq CD_SLOTP(%rbx), %rcx
@@ -522,6 +645,14 @@ card_fexec_post:
 	incq %rax
 	movq %rax, SL_FN_ID(%rcx)
 	movq %r13, SL_ENTRY(%rcx)
+	movq fexec_flags(%rip), %rax
+	movl %eax, SL_FLAGS(%rcx)
+	movq %fs:0x28, %rax			# the stack-protector canary the program compares against
+	movq %rax, SL_CANARY(%rcx)
+	movq refresh_n(%rip), %rax		# the lines the host changed since the last region (region.S), consumed by this post
+	movl %eax, SL_REFRESH_N(%rcx)
+	movq $0, refresh_n(%rip)
+	movq $0, refresh_bytes(%rip)
 	movq fexec_threads(%rip), %rax
 	movl %eax, SL_THREADS(%rcx)
 	movl SD_IND(%r12), %eax

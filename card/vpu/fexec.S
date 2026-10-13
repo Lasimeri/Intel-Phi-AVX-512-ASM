@@ -34,6 +34,7 @@
 	.set CTX_FAULT, 2272
 	.set CTX_KIND, 2280
 	.set CTX_FLAGS_RAW, 2288
+	.set CTX_SIGINFO, 2296			# a fault's signal number | si_code << 8
 	.set CTX_BYTES, 2304
 	.set TE_CTX, TLS_EXEC
 	.set TE_SCRATCH, TLS_EXEC + 8
@@ -104,6 +105,7 @@ fx_hi:	.skip 8
 fx_step:	.skip 8
 fx_per:	.skip 8
 fx_rip:	.skip 8
+fx_flags:	.skip 8			# the request's flags (FXF_*)
 fx_ind_reg:	.skip 8
 fx_bound_reg:	.skip 8
 fx_tab:	.skip FX_TAB_MAX * FT_BYTES
@@ -180,6 +182,14 @@ fexec_init:
 	movl $SIGILL, %edi
 	call fx_sig_install
 	movq $0, %fs:TE_CTX
+	# the exit stub's address in every thread's TLS block
+	leaq tls_blocks(%rip), %rdi
+	leaq fx_exit_jmp(%rip), %rax
+	movl $MAX_POOL + 1, %ecx
+1:	movq %rax, TE_EXIT(%rdi)
+	addq $TLS_BYTES, %rdi
+	decl %ecx
+	jnz 1b
 	popq %rbx
 	ret
 .Lfx_mmap_fail:
@@ -316,6 +326,51 @@ fexec_run:
 	movl $REGS_BYTES / 64 + 1, %edx
 	call phi_copy64
 	movq %r15, fx_rip(%rip)
+	movl SL_FLAGS(%rbx), %eax
+	movq %rax, fx_flags(%rip)
+	# the program's stack-protector canary into every thread's TLS (fs:0x28 as glibc has it)
+	movq SL_CANARY(%rbx), %rax
+	leaq tls_blocks(%rip), %rcx
+	movl $MAX_POOL + 1, %edx
+31:	movq %rax, TLS_CANARY(%rcx)
+	addq $TLS_BYTES, %rcx
+	decl %edx
+	jnz 31b
+	# the refresh: the lines the host changed since the last run, copied
+	# in by this core from the slot data (SL_REFRESH_N ranges of
+	# SD_REFRESH_TAB, their bytes in order at SD_REFRESH). A core's stores
+	# are coherent with the pool's caches; a DMA fill is not against a
+	# line a core holds dirty (the card's GOLS protocol serves a dirty
+	# line to the engine without writing it back).
+	movl SL_REFRESH_N(%rbx), %eax
+	testl %eax, %eax
+	jz 32f
+	cmpl $512, %eax
+	ja 32f
+	pushq %r14
+	pushq %r15
+	movl %eax, %r14d			# ranges left
+	movq %r12, %r15
+	shlq $20, %r15
+	addq $OFF_SLOTDATA, %r15
+	addq window(%rip), %r15			# the slot data
+	leaq SD_REFRESH(%r15), %rsi		# the bytes
+	addq $SD_REFRESH_TAB, %r15		# the table
+33:	movq 0(%r15), %rdi			# the address
+	movq 8(%r15), %rdx			# the bytes, a multiple of 64
+	pushq %rsi
+	pushq %rdx
+	shrq $6, %rdx
+	call phi_copy64
+	popq %rdx
+	popq %rsi
+	addq %rdx, %rsi
+	addq $16, %r15
+	decl %r14d
+	jnz 33b
+	popq %r15
+	popq %r14
+32:
 	# the split: threads (the request's, at most this slot's pool plus
 	# this thread), over [counter, bound) in steps of step; a step of 0
 	# is one slice
@@ -394,6 +449,8 @@ fexec_run:
 	movq %rax, SR_EXIT_RIP(%r13)
 	movq CTX_FAULT(%rdx), %rax
 	movq %rax, SR_EXIT_AUX(%r13)
+	movl CTX_SIGINFO(%rdx), %eax
+	movl %eax, SR_SIGINFO(%r13)
 	jmp 27f
 26:	incl %ecx
 	jmp 28b
@@ -503,6 +560,59 @@ fx_ret_stub:
 	xorl %eax, %eax
 	ret
 
+# fx_exit_jmp: a translated blob leaves through `jmp *%fs:FX_EXIT_TPOFF`
+# with the exit's kind in the scratch's FX_S_KIND, the address the host
+# resumes at in FX_S_SITE (a call site, a return address popped, a branch
+# target) and an aux in FX_S_XFER (the callee, the target): the file as
+# fx_ret_stub stores it, the kind as the context's, the aux as the fault
+# address field, back to fexec_run.
+	.if TLS_EXEC + 24 != FX_EXIT_TPOFF
+	.error "FX_EXIT_TPOFF is not TLS_EXEC + 24"
+	.endif
+	.set TE_EXIT, TLS_EXEC + 24
+fx_exit_jmp:
+	movq %rax, %fs:TE_SCRATCH
+	lahf
+	seto %al
+	movq %rax, %fs:TE_SCRATCH2
+	movq %fs:TE_CTX, %rax
+	movq %rcx, REGS_GPR + 8(%rax)
+	movq %rdx, REGS_GPR + 16(%rax)
+	movq %rbx, REGS_GPR + 24(%rax)
+	movq %rsp, REGS_GPR + 32(%rax)
+	movq %rbp, REGS_GPR + 40(%rax)
+	movq %rsi, REGS_GPR + 48(%rax)
+	movq %rdi, REGS_GPR + 56(%rax)
+	movq %r8, REGS_GPR + 64(%rax)
+	movq %r9, REGS_GPR + 72(%rax)
+	movq %r10, REGS_GPR + 80(%rax)
+	movq %r11, REGS_GPR + 88(%rax)
+	movq %r12, REGS_GPR + 96(%rax)
+	movq %r13, REGS_GPR + 104(%rax)
+	movq %r14, REGS_GPR + 112(%rax)
+	movq %r15, REGS_GPR + 120(%rax)
+	movq %fs:TE_SCRATCH, %rcx
+	movq %rcx, REGS_GPR(%rax)
+	movq %fs:TE_SCRATCH2, %rcx
+	movq %rcx, CTX_FLAGS_RAW(%rax)
+	movq %fs:FX_SCRATCH_TPOFF + FX_S_SITE, %rcx
+	movq %rcx, REGS_RIP(%rax)
+	movq %rcx, CTX_EXIT_RIP(%rax)
+	movl %fs:FX_SCRATCH_TPOFF + FX_S_KIND, %ecx
+	movl %ecx, CTX_KIND(%rax)
+	movq %fs:FX_SCRATCH_TPOFF + FX_S_XFER, %rcx
+	movq %rcx, CTX_FAULT(%rax)
+	movq CTX_SAVED_RSP(%rax), %rsp
+	FX_VPU_SAVE
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbp
+	popq %rbx
+	xorl %eax, %eax
+	ret
+
 # fx_exit_stub: where fx_leave sends the interrupted context: rdi the
 # context, rsp this process's own; the vector unit stored after sigreturn
 # (kernel patch 0030 keeps it across the handler).
@@ -576,6 +686,12 @@ fx_on_fault:
 	je 1f
 	cmpq $0, %fs:TE_CTX
 	je 1f
+	movl 0(%rsi), %ecx			# si_signo
+	movl 8(%rsi), %eax			# si_code
+	shll $8, %eax
+	orl %eax, %ecx
+	movq %fs:TE_CTX, %rax
+	movl %ecx, CTX_SIGINFO(%rax)
 	movq SI_ADDR(%rsi), %rax
 	movq %rdx, %rdi
 	movl $X_FAULT, %esi
@@ -653,6 +769,8 @@ fx_slice:
 	movq %r9, CTX_REGS + REGS_GPR(%rbx,%rax,8)
 2:	movq fx_rip(%rip), %rax
 	movq %rax, CTX_REGS + REGS_RIP(%rbx)
+	testq $FXF_IDSTACK, fx_flags(%rip)
+	jnz 21f					# the program's own stack: rsp as the file has it, the blob leaves through the exit stub
 	movq %r12, %rax
 	imulq $FX_STACK, %rax, %rax
 	addq fx_stack(%rip), %rax
@@ -660,8 +778,9 @@ fx_slice:
 	leaq fx_ret_stub(%rip), %rcx
 	movq %rcx, (%rax)
 	movq %rax, CTX_REGS + REGS_GPR + 32(%rbx)
-	movl $0, CTX_KIND(%rbx)
+21:	movl $0, CTX_KIND(%rbx)
 	movq $0, CTX_FAULT(%rbx)
+	movl $0, CTX_SIGINFO(%rbx)
 	movq %rbx, %fs:TE_CTX
 	movq %rbx, %rdi
 	call fx_enter

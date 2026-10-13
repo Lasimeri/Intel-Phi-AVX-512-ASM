@@ -128,4 +128,5 @@ seeds:
 	.long 0, 0, OPK_NONE, 0
 	.quad 0, 0
 	.quad 0, 0, 0, 0, 0, 0, 0, 0
+	.skip SD_BYTES * SEEDS_DYN_MAX		# room for the functions found at a fault (seed_dyn_add, xlfn.S)
 nseeds:	.quad 3
