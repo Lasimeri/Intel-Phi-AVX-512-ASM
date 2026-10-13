@@ -7,40 +7,53 @@ AVX-512 instruction it reaches is carried, with the code around it, to
 the card's vector units and executed there as MVEX, the card's own
 encoding of the same operations. Nothing is interpreted. Results are
 bit-identical to what real AVX-512 hardware produces, on everything the
-tests here cover; a review of 2026-09-24 found cases that were not (masked
-stores and masked unaligned moves, fixed 2026-09-25) and others still open
-(listed under "Still open at the end of the day" in
-[`docs/results/2026-09-25-review-transparent-path.md`](docs/results/2026-09-25-review-transparent-path.md)).
+tests here cover. The repository is being rewritten in place, in
+assembly, since 2026-10-13 (the section "The restart" below; the plan's
+stages and gates are in the dated records under `docs/results`).
 
 ```
-scripts/phi512.sh ./my-avx512-program        # that is all of it
-scripts/phi512.sh --verbose ./my-avx512-program   # each region the card ran, its phases and times
+PHI512_V3=1 scripts/phi512.sh -- ./my-avx512-program        # the assembly library, four cards
+PHI512_CARDS=0,1,2,3 PHI512_VERBOSE=1 LD_PRELOAD=host/target/release/libphi512-asm.so ./my-avx512-program
 ```
 
-The host here is a Ryzen 7 5800X (AVX2 and FMA3, no AVX-512) with two
-cards. Measured on card 0 with `tools/avx512-seamless-test.c` (a
-polynomial, a dot product and an integer kernel, each checked lane for
-lane against a scalar reference), against the only other way to run that
-code on this host, a software emulator:
+The host is the GPU rack's EPYC 7742 (no AVX-512) with four cards.
+Measured 2026-10-13 with `tools/avx512-seamless-test.c` (a polynomial,
+a dot product and an integer kernel, each checked lane for lane against
+a scalar reference), the kernels translated from the binary by the
+assembly translator and run on four cards, bit-identical at every size:
 
-| elements | polynomial | dot product | integers | emulated polynomial |
-| --- | --- | --- | --- | --- |
-| 65536 | 10.1 to 12.7 ms | 5.3 to 6.6 ms | 7.8 to 7.9 ms | 22.5 ms |
-| 1048576 | 23 to 37 ms | 23.7 to 25.2 ms | 18.1 to 18.3 ms | 376 ms |
-| 16777216 | 207 to 375 ms | 411 ms | 341 ms | about 6 s |
+| elements | polynomial | dot product | integers |
+| --- | --- | --- | --- |
+| 65536 | 3.2 ms | 1.2 ms | 1.8 ms (the first call: its translation and loads) |
+| 1048576 | 8.3 ms | 14.1 ms | 7.4 ms |
+| 16777216 | 71.6 ms | 182 ms | 57.7 ms |
 
-(Two runs each, 2026-09-25, with the fetch and the write-back of 4 KiB pages
-staged through a huge page, `card/vpu/vpu_exec.md`; the emulated column is 2026-09-22.)
-These are the numbers of the sound path. On 2026-09-22 the same test ran in 7.7,
-3.3 and 5.5 ms at 65536 and 98, 139 and 91 ms at 16 M, before a phase's
-chunks became 4 KiB-page mappings in which only the declared pages are
-accessible: an access the planner did not declare now faults instead of
-reading whatever the card held, and every fetch pays for scattered pages
-and a change of protection on 57 threads
-([`docs/results/2026-09-22-ggml-backend.md`](docs/results/2026-09-22-ggml-backend.md),
-"the price of soundness"; the transport itself is unchanged, as the
-stack's block-path timer shows,
-[`card/examples/blkbench.md`](https://github.com/Lasimeri/Intel-Phi-3120A/blob/main/card/examples/blkbench.md)).
+([`docs/results/2026-10-13-translator-seamless.md`](docs/results/2026-10-13-translator-seamless.md);
+the hand-written blobs of stage 2 give the same times within the noise.)
+The time is the requests' latency, not the cards' work: the 65536
+polynomial call spends 0.9 ms making memory resident, 1.3 ms in the run
+of which the cards compute for 33 us, 0.2 ms fetching the result
+([`docs/results/2026-10-13-preload-seamless-fast.md`](docs/results/2026-10-13-preload-seamless-fast.md)).
+
+## The restart (2026-10-13)
+
+The wrapper is being rewritten in place, in assembly, component by
+component (the plan's stages; the Rust crates stay until the last ones
+are replaced). What runs today:
+
+| stage | what | measured |
+| --- | --- | --- |
+| 1 | protocol v3: slot processes on the card, one 64-byte line of doorbells, `K_PING`, `K_LOAD`, `K_FEXEC`, `K_RESIDENT`, `K_PUSH`, `K_FLUSH` | round trips 45 to 48 us; a 114-slice dispatch 40 us |
+| 2 | the assembly preload (`host/asm/phi512`: the SIGILL handler, the register file from the signal frame, residency by 64 KiB units with a coverage bitmap, loops split into a stripe per card, outputs fetched by the card's DMA engine) | the seamless test bit-identical on four cards; 64 MiB of outputs in 18 to 20 ms (3.2 GB/s) |
+| 3 | the translator: `decode.S` (every field equal to iced-x86 over 2.34 million instructions of ten binaries), `fnscan.S` (a function indexed: kinds, branch targets, calls), `mvex.S` and `xlate.S` (the recipes: one-to-one forms, 128- and 256-bit forms under lane masks, the unaligned pairs, extracts, shuffles, scalar forms), `blob.S` (a function's blob: copies, re-based rip-relative operands, branches re-laid out, exits, constants, the rip map), `xlfn.S` (a function translated at its first fault, loaded on every card) | the seamless test from automatic translation, the table above |
+| 3, in progress | regions and exits (`region.S`): a function runs on the card from the fault to its next call, return, jump out or syscall; the host continues natively from there; memory the region touches is made resident as it faults, shadowed, and written back by diff | the region test's first kernel: the loop on the card, the call served on the host with the right data, the second region resumed |
+
+The target is `llama.phi`'s AVX-512F build of `libggml-cpu.so` under
+the twin's `llama-simple` on the BF16 Qwen3.8 Flash-Next model (the
+AVX2 twin's reference: 1.78 tokens/s, its text recorded), the
+functions it faults in translated lazily; then the planner that gives
+each kernel its loop and operand ranges automatically, the placement of
+dense rows and hot experts on the cards, and the A/B against production.
 
 ## What you need
 
@@ -65,27 +78,37 @@ stack's block-path timer shows,
 
 ## How it works
 
-The wrapper preloads `libphi512.so`. The host CPU raises SIGILL at the
-program's first AVX-512 instruction; the library's handler walks the
-program's code graph from there to a region bounded by what the card
-cannot run (a call, a return, an SSE instruction the host runs itself),
-rewrites the EVEX instructions to MVEX in place at the byte level (the
-two encodings share their operand bytes; `host/crates/avx512-xlate`),
-plans the region (`host/crates/phi512/src/plan.md`: what the registers
-hold, which memory the region touches, which loop to split), and sends
-it to the card's worker through the shared window. The card maps the
-program's code and memory at the program's own addresses, runs the
-loop across its threads, and returns the register file and what the
-region wrote; the program resumes after the region with its registers
-and memory as if the host had executed it. `host/crates/phi512/src/
-offload.md` and `card/vpu/vpu_exec.md` have the whole of it;
-`docs/results/2026-09-22-seamless-card.md` has how it got there and what
-each piece cost.
+The wrapper preloads `libphi512-asm.so` (`host/asm/phi512`). The host
+CPU raises SIGILL at the program's first AVX-512 instruction; the
+handler finds the function that holds it (the executable's symbol
+table), indexes it instruction by instruction (`decode.S`, `fnscan.S`),
+and builds its blob for the card (`blob.S`): the scalar instructions
+copied, a rip-relative operand re-based through a register, the
+branches re-laid out, every EVEX and VEX instruction written as the
+card's MVEX by its recipe (`xlate.S` over the emitter `mvex.S`: the
+operations the card has one to one, a 128- or 256-bit form as the same
+operation under a lane mask, memory operands staged through the
+card's unaligned pairs, extracts and shuffles as permutes), and the
+exits (a call, a return, a jump out of the function, a syscall) as
+jumps into a card stub that hands the register file back. The blob is
+loaded on every card (`K_LOAD`); the call is posted (`K_FEXEC`) with the
+register file from the signal frame, entered at the faulting
+instruction through the blob's rip map, and run on the program's own
+addresses: the memory it needs is made resident in 64 KiB units
+(`K_RESIDENT`, the card's DMA engine), a kernel's loop split into a
+stripe per card, the outputs fetched back (`K_PUSH`). At an exit the
+host continues natively from the address the blob named, with the
+registers as the card left them and the card's writes applied; the
+next AVX-512 instruction starts the next region.
+[`host/asm/phi512/phi512.md`](host/asm/phi512/phi512.md) lists the
+units; [`card/vpu/fexec.md`](card/vpu/fexec.md) and
+[`card/vpu/resident.md`](card/vpu/resident.md) have the card's side.
 
-The explicit path is still there for a program written for the card:
-`phi-vpu poly` hands a kernel to the worker directly (`scripts/phi-vpu.sh`).
-The software emulator that preceded the card path stays as the fallback
-behind `--emulate`.
+The hand-written blobs of stage 2 stay under `PHI512_HANDBLOBS=1`, the
+Rust library (`host/crates/phi512`, `scripts/phi512.sh` without
+`PHI512_V3`) and its emulator until their last parts are replaced, and
+the explicit path for a program written for the card (`phi-vpu poly`,
+`scripts/phi-vpu.sh`).
 
 ## The cards as GPUs for AVX-512, beside the CPU: the ggml backend
 
@@ -314,11 +337,13 @@ and `libggml_phi.so` from this repository.
 
 ```
 ╔══ host (EPYC 7742 on the rack: no AVX-512) ════════════════════════════════════════════════════╗
-║ program built -mavx512f ──SIGILL──▶ libphi512.so (host/crates/phi512: handler, planner,        ║
-║                                      avx512-xlate EVEX->MVEX, dispatcher)   [being replaced]   ║
+║ program built -mavx512f ──SIGILL──▶ libphi512-asm.so (host/asm/phi512): sigill.S the handler,  ║
+║   elf.S the function at the fault, decode.S + fnscan.S its index, xlate.S/mvex.S/blob.S its    ║
+║   blob (EVEX and VEX as MVEX, exits as stubs, the rip map), xlfn.S loads it, region.S runs a   ║
+║   region to its exit, card.S the session; the Rust libphi512.so (host/crates) being replaced   ║
 ║ llama.cpp ──GGML_BACKEND_PATH──▶ libggml_phi.so (host/asm/ggml-phi + common: the backend)      ║
 ║ drivers: phi-vpu (Rust: status, poly, matmul-check); phi-vpu-ping, -fexec, -resident (asm)     ║
-║ scripts: phi512.sh, phi-ggml.sh, phi-vpu.sh (deploy/start/ping/...), stack.sh -> the stack     ║
+║ scripts: phi512.sh (PHI512_V3=1: the assembly library), phi-ggml.sh, phi-vpu.sh, stack.sh      ║
 ║                              │ writes requests, reads replies                                  ║
 ║                              ▼                                                                 ║
 ║ /dev/shm/phi-hostmem[-N], 2 GiB a card (the window: card/vpu/*.h, proto.inc, layout-checked)   ║
@@ -332,14 +357,16 @@ and `libggml_phi.so` from this repository.
 ║   ├─ cdma.S: channel 7, the landing page (shared), cdma_submit_phys into a pool page's frame   ║
 ║   ├─ resident.S: pool of huge pages (-R), shared table, K_RESIDENT fills, mremap to identity   ║
 ║   └─ sched.S: -S slot processes of -C cores (forked): job word, K_PING, K_LOAD and K_FEXEC     ║
-║        through fexec.S (arena, register file in and out, return stub, fault exits), write-back ║
+║        through fexec.S (arena, the file in and out, a blob entered at its rip map offset on    ║
+║        the program stack, the exit stub at fs:1048, faults as X_FAULT with the address)        ║
 ║ /opt/phi/vpu/phi-vpu-worker and worker.log; card/vpu/build.sh, audited by phi-isa-audit        ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
 | path | what |
 | --- | --- |
-| `host/crates/phi512` | the preloaded library: the SIGILL handler, the planner, the dispatcher (and the emulator, as the fallback) |
+| `host/asm/phi512` | `libphi512-asm.so`, the preloaded library in assembly: the handler, the decoder and its generated tables, the function index, the recipes and emitter, the blob builder, regions, the cards' session ([`host/asm/phi512/phi512.md`](host/asm/phi512/phi512.md)) |
+| `host/crates/phi512` | the Rust library that preceded it: the SIGILL handler, the planner, the dispatcher, the emulator; replaced piece by piece |
 | `host/crates/avx512-xlate` | EVEX to MVEX: the byte-level rewriter for the seamless path and the builder-based translator for kernels |
 | `host/crates/knc-mvex` | the MVEX encoder the translator builds on |
 | `host/crates/phi-vpu` | the protocol with the card worker, the shared window, the explicit driver |
@@ -347,14 +374,16 @@ and `libggml_phi.so` from this repository.
 | `host/crates/phi-pld` | `phi-pld`, prompt lookup decoding over libllama (llama.cpp unchanged), served as llama-server serves; its simulator; built where llama.cpp is found |
 | `card/vpu` | the card-side worker: the exec engine, the explicit path's thread pool and the matrix-multiply service; built by `scripts/phi-vpu.sh deploy`, on the host with the stack's cross toolchain when it has one (`card/vpu/build.md`) |
 | `card/examples` | the AVX-512 kernel and its translation the explicit path and the ground-truth check use |
-| `tools` | the seamless, narrow and review tests, the conformance programs, the protocol layout check |
+| `tools` | the seamless, narrow, forms, review and region tests, the decoder and scan checks against iced-x86, the table generators, the protocol layout check |
 | `scripts` | `phi512.sh` (the wrapper), `phi-vpu.sh` (the worker), `phi512-check.sh` and `phi512-ground.sh` (conformance against hardware and against the card), `phi512-install.sh` (system-wide preload) |
 | `docs/research` | the precision audit that gates the translation, and the transparency design |
 | `docs/results` | dated records with every number |
 
 `make check` runs the documentation rules, formatting, lints, the build,
-tests, the protocol layout check, and the comparison of `knc-mvex` with
-the stack's copy (`mvex-check`); `CONTRIBUTING.md` has the rules.
+tests, the protocol layout check, the comparison of `knc-mvex` with the
+stack's copy (`mvex-check`), and the decoder and function-scan checks
+against iced-x86 (`decode-check`, `fnscan-check`); `CONTRIBUTING.md` has
+the rules.
 
 ## The repositories
 
