@@ -75,6 +75,8 @@ shared:	.skip 8			# the page every process shares (SH_*, proto.inc)
 	.balign 64
 slotseq_seen:	.skip 64		# the SLOTSEQ line as last acted on (a line: phi_copy64 wants it aligned)
 slot_polls:	.skip 8
+	.globl res_want
+res_want:	.skip 4			# -R: huge pages pooled for the program's memory (resident.S)
 	.balign 64
 # The generation and, for vpu_pool_map, the whole of its work, on one line:
 # a thread that sees the bump has the job in the same fetch.
@@ -237,7 +239,7 @@ _start:
 	leaq s_T(%rip), %rdi
 	call str_eq
 	testl %eax, %eax
-	jz 74f
+	jz 75f
 	call opt_value
 	testq %rax, %rax
 	jz 731f
@@ -245,6 +247,14 @@ _start:
 	jbe 732f
 731:	movl $1, %eax
 732:	movl %eax, slot_tpc(%rip)
+	jmp 8f
+75:	movq (%rbx), %rsi
+	leaq s_R(%rip), %rdi
+	call str_eq
+	testl %eax, %eax
+	jz 74f
+	call opt_value
+	movl %eax, res_want(%rip)
 	jmp 8f
 74:	movq (%rbx), %rsi
 	call parse_u64
@@ -1774,6 +1784,7 @@ s_d:	.asciz "-d"
 s_S:	.asciz "-S"
 s_C:	.asciz "-C"
 s_T:	.asciz "-T"
+s_R:	.asciz "-R"
 s_cdma:	.asciz "cdma: "
 s_cdma_up:	.asciz "channel 7 carries the pull: ring and landing area at "
 s_cdma_win:	.asciz ", the window at "

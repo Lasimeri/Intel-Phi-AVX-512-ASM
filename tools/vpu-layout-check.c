@@ -175,7 +175,8 @@ int main(void)
 	check("slot_req.loop_exit", offsetof(struct vpu_slot_req, loop_exit), 312);
 	check("slot_req.refresh_n", offsetof(struct vpu_slot_req, refresh_n), 320);
 	check("slot_req.defer_cap", offsetof(struct vpu_slot_req, defer_cap), 324);
-	check("slot_req.resident_hint", offsetof(struct vpu_slot_req, resident_hint), 328);
+	check("slot_req.wb_n", offsetof(struct vpu_slot_req, wb_n), 328);
+	check("slot_req.wb_bytes", offsetof(struct vpu_slot_req, wb_bytes), 332);
 	check("VPU_SLOT_REPLY", VPU_SLOT_REPLY, 2048);
 	check("sizeof(vpu_slot_reply)", sizeof(struct vpu_slot_reply), 88);
 	check("slot_reply.status", offsetof(struct vpu_slot_reply, status), 8);

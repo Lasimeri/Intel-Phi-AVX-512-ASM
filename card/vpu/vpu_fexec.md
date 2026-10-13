@@ -57,15 +57,22 @@ file in `SD_REGS_IN` (`vpu_regs` of `vpu_exec.h`, 2256 bytes); the run is
 on the slot's main thread and its own stack with a return stub as the
 return address; the file as left is in `SD_REGS_OUT`, the reply says
 `X_RET`, `X_FAULT` (address in `exit_aux`) or `X_REFUSED` (`exit_rip`).
-Stripes, refresh and the deferred list are not read yet.
+`K_RESIDENT`: `fn_id` = the program address (chunk aligned), `entry` =
+the staging index in `RESIDENT` (0 to 15), `threads` = the class (0
+immutable, 1 writable, informational so far); the reply's `exit_aux` is
+the pool page. A `K_FEXEC` may declare `wb_n` write-back ranges in
+`SD_WB_TAB`, each 64-byte aligned and sized; their bytes come back in
+`SD_WB` in order, the reply's `wb_n` and `wb_ns` say how many and how
+long. Stripes, refresh and the deferred list are not read yet.
 
 ## The structures
 
 `struct vpu_slot_req` (336 bytes, at the slot's start): `seq`, `kind`,
 `flags`, `fn_id`, `entry` (an offset into the blob), `threads`,
 `nstripes` and 16 `{lo, hi}` stripes, the split loop's `ind_reg`,
-`bound_reg`, `step` and `loop_exit`, `refresh_n`, `defer_cap`,
-`resident_hint`. The host writes every field, a fence, then the u16.
+`bound_reg`, `step` and `loop_exit`, `refresh_n`, `defer_cap`, `wb_n` and
+`wb_bytes` (the write-back ranges in `SD_WB_TAB`). The host writes every
+field, a fence, then the u16.
 
 `struct vpu_slot_reply` (88 bytes, at 2048): `seq`, `status`
 (`VPU_OK` or a `VPU_E_*`), `exit_kind`, `exit_rip`, `exit_aux`, `run_ns`,

@@ -283,7 +283,8 @@
 	.set SL_LOOP_EXIT, 312
 	.set SL_REFRESH_N, 320
 	.set SL_DEFER_CAP, 324
-	.set SL_RESIDENT_HINT, 328
+	.set SL_WB_N, 328
+	.set SL_WB_BYTES, 332
 	.set SL_REQ_BYTES, 336
 	.set SLOT_REPLY, 2048
 	.set SR_SEQ, 0

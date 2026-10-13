@@ -9,7 +9,7 @@ pole after the whole-expert placement). No libc: system calls direct
 `build.sh` and audited for what the card does not run.
 
 ```
-phi-vpu-worker [-v] [-t N] [-s MS] [-i US] [-e N] [-m 0|1] [-d 0|1] [-S slots] [-C cores] [-T threads] [threads]
+phi-vpu-worker [-v] [-t N] [-s MS] [-i US] [-e N] [-m 0|1] [-d 0|1] [-S slots] [-C cores] [-T threads] [-R pages] [threads]
 ```
 
 `threads` 1 to 228 (57): the dispatcher plus the pool. `-v` logs each
@@ -148,4 +148,6 @@ of them), and `main_loop` reads the SLOTSEQ line each poll
 (`slots_poll`), hands a posted slot its job, refreshes `idle_since` when
 it did, and sums the slots' counters into `OFF_STATS` every 64 polls
 (`slots_stats`). The readiness word is re-asserted every 64 polls, not
-every poll. With `-S 0` nothing of this runs.
+every poll. With `-S 0` nothing of this runs. `-R pages` (0) is the pool
+of huge pages for the program's memory ([`resident.md`](resident.md)),
+mapped before the fork.

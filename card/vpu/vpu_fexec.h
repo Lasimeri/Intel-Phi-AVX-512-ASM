@@ -80,7 +80,8 @@ struct vpu_slot_req {
     uint64_t loop_exit;
     uint32_t refresh_n;
     uint32_t defer_cap;
-    uint64_t resident_hint;
+    uint32_t wb_n;             /* write-back ranges in SD_WB_TAB ({addr, len}, 64-byte aligned and sized) */
+    uint32_t wb_bytes;         /* their bytes together */
 };
 
 /* The reply, at VPU_SLOT_REPLY: the fields, then seq last. */

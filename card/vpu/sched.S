@@ -17,6 +17,8 @@
 slotseq_now:	.skip 64		# the SLOTSEQ line as just read
 slreq:	.skip 64			# a posted slot's first request line
 reply_buf:	.skip 128		# the reply built here, stored in two lines
+slreq_wb:	.skip 64			# the request's line holding the write-back count
+wb_tab:	.skip 512 * 16			# the write-back ranges, read from SD_WB_TAB
 sum_buf:	.skip 64			# the summed counters for OFF_STATS
 meminfo_buf:	.skip 4096
 stats_calls:	.skip 8
@@ -77,6 +79,9 @@ slots_start:
 	movq %rax, %rbx
 	call meminfo_free
 	movq %rax, SHG_FREE_BYTES(%rbx)
+	# the pool of the program's memory, shared with the slots (resident.S)
+	movl res_want(%rip), %edi
+	call res_init
 	# the SLOTSEQ line as it is now: a post left by an earlier worker's
 	# run is not replayed
 	leaq slotseq_seen(%rip), %rdi
@@ -184,6 +189,8 @@ slots_poll:
 	cmpw %cx, (%rdx,%r12,2)
 	je 8f
 	movw %cx, (%rdx,%r12,2)
+	testw %cx, %cx				# a 0: the host opening the slot, no job
+	jz 8f
 	# the job word: the u16 widened (consecutive posts differ); the slot
 	# reads its request block itself, on its own core
 	movq shared(%rip), %r13
@@ -196,7 +203,31 @@ slots_poll:
 	movq %rcx, %rax
 	shrl $12, %eax
 	movq $0, SH_PULL_SEQ(%r13)
-	cmpl $K_FEXEC, %eax
+	cmpl $K_RESIDENT, %eax
+	jne 5f
+	# K_RESIDENT: the request line (program address, staging index,
+	# class), a pool page, the fill submitted; the slot waits for it
+	pushq %rcx
+	movq %r12, %rsi
+	shlq $12, %rsi
+	addq window(%rip), %rsi
+	addq $OFF_SLOTS, %rsi
+	leaq slreq(%rip), %rdi
+	movl $1, %edx
+	call phi_copy64
+	movq slreq + SL_FN_ID(%rip), %rdi
+	movl slreq + SL_THREADS(%rip), %esi
+	call res_assign
+	movl %eax, SH_RES_IDX(%r13)
+	cmpl $-1, %eax
+	je 51f
+	movl %eax, %edi
+	movq slreq + SL_ENTRY(%rip), %rsi
+	call res_pull
+	movq %rax, SH_PULL_SEQ(%r13)
+51:	popq %rcx
+	jmp 6f
+5:	cmpl $K_FEXEC, %eax
 	jne 6f
 	pushq %rcx
 	movq %r12, %rdi
@@ -426,7 +457,27 @@ sched_main:
 	je 11f
 	cmpl $K_FEXEC, %eax
 	je 12f
+	cmpl $K_RESIDENT, %eax
+	je 14f
 	movl $E_KERNEL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+14:	# K_RESIDENT: the page the dispatcher assigned, its fill waited for
+	movl SH_RES_IDX(%r13), %edi
+	cmpl $-1, %edi
+	jne 141f
+	movl $E_ALLOC, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+141:	cmpq $0, SH_PULL_SEQ(%r13)
+	jne 142f
+	movl $E_PULL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+142:	call res_wait
+	testl %eax, %eax
+	jnz 143f
+	movl $E_PULL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+143:	movl SH_RES_IDX(%r13), %eax
+	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
 	jmp 1f
 11:	leaq slreq(%rip), %rdi
 	movl %r12d, %esi
@@ -442,7 +493,14 @@ sched_main:
 	jnz 13f
 	movl $E_PULL, reply_buf + SR_STATUS(%rip)
 	jmp 1f
-13:	leaq slreq(%rip), %rdi
+13:	# the program's memory this process has not placed yet, then the run,
+	# then the write-back of the declared ranges
+	call res_map_all
+	testl %eax, %eax
+	jns 131f
+	movl $E_ALLOC, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+131:	leaq slreq(%rip), %rdi
 	movl %r12d, %esi
 	leaq reply_buf(%rip), %rdx
 	movq %r12, %rcx
@@ -450,6 +508,9 @@ sched_main:
 	addq cdma_land(%rip), %rcx
 	call fexec_run
 	movl %eax, reply_buf + SR_STATUS(%rip)
+	testl %eax, %eax
+	jnz 1f
+	call wb_ranges
 1:	movq shared(%rip), %rcx
 	movq SHG_FREE_BYTES(%rcx), %rax
 	movq %rax, reply_buf + SR_FREE_BYTES(%rip)
@@ -578,4 +639,70 @@ land_wait:
 	popq %rbx
 	ret
 8:	movl $1, %eax
+	ret
+
+# wb_ranges: the request's write-back ranges (SL_WB_N of {addr, len} in
+# the slot's SD_WB_TAB, each 64-byte aligned and sized) copied from this
+# process's memory into the slot's SD_WB, one after another, in lines;
+# the reply's wb_n and wb_ns. Reads the request's sixth line for the count.
+wb_ranges:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	call now_ns
+	movq %rax, %r15
+	# the count: the line holding SL_WB_N
+	leaq slreq_wb(%rip), %rdi
+	movq %r14, %rsi
+	addq $SL_WB_N & -64, %rsi
+	movl $1, %edx
+	call phi_copy64
+	movl slreq_wb + (SL_WB_N & 63)(%rip), %ebx	# n
+	testl %ebx, %ebx
+	jz 8f
+	cmpl $512, %ebx
+	jbe 1f
+	movl $512, %ebx
+1:	# the table: n entries of 16 bytes, in lines
+	movq %r12, %r13
+	shlq $20, %r13
+	addq $OFF_SLOTDATA, %r13
+	addq window(%rip), %r13			# this slot's SLOTDATA
+	leaq wb_tab(%rip), %rdi
+	leaq SD_WB_TAB(%r13), %rsi
+	leal 3(%rbx), %edx
+	shrl $2, %edx
+	call phi_copy64
+	leaq SD_WB(%r13), %r14			# the destination, advancing
+	xorl %ecx, %ecx
+2:	cmpl %ebx, %ecx
+	jae 8f
+	movl %ecx, %eax
+	shll $4, %eax
+	leaq wb_tab(%rip), %rdx
+	movq (%rdx,%rax), %rsi			# addr
+	movq 8(%rdx,%rax), %rdx			# len
+	shrq $6, %rdx
+	jz 3f
+	movq %r14, %rdi
+	pushq %rcx
+	pushq %rdx
+	call phi_copy64
+	popq %rdx
+	popq %rcx
+	shlq $6, %rdx
+	addq %rdx, %r14
+3:	incl %ecx
+	jmp 2b
+8:	movl %ebx, reply_buf + SR_WB_N(%rip)
+	call now_ns
+	subq %r15, %rax
+	movq %rax, reply_buf + SR_WB_NS(%rip)
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
 	ret

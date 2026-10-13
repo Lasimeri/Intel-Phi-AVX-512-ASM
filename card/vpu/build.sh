@@ -8,7 +8,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-sources=(worker sched fexec text exec matmul rows kernels cdma)
+sources=(worker sched fexec resident text exec matmul rows kernels cdma)
 bench_sources=(dmabench cdma text)
 
 link() {

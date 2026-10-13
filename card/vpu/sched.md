@@ -63,6 +63,20 @@ naming the last kind; and every 2048 calls `MemFree` of `/proc/meminfo`
 into the shared page, which every reply carries as `free_bytes` (the
 host's residency budget at stage 2).
 
+## K_RESIDENT, the pool and the write-back (2026-10-13, later)
+
+The dispatcher reads a `K_RESIDENT`'s request line (the kind rides in
+the u16's top four bits), assigns a pool page and submits the DMA fill
+straight into its frame ([`resident.md`](resident.md)); the page index
+and the copy's sequence number ride in the job line (`SH_RES_IDX`,
+`SH_PULL_SEQ`) and the slot waits for the copy (`res_wait`) and
+replies with the index. Before a `K_FEXEC` the slot moves every resident
+page it has not placed yet to the program's address (`res_map_all`),
+and after the run `wb_ranges` copies the request's declared ranges
+(`SL_WB_N` of `{addr, len}` in `SD_WB_TAB`, 64-byte aligned) into
+`SD_WB`. A u16 of 0 is a host opening the slot (its sequence numbers
+start again): recorded, no job.
+
 ## What it costs
 
 The floor of a request is this file's work: a host store, one line read

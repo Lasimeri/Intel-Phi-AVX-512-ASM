@@ -75,6 +75,21 @@ s_to:	.asciz ", timeouts "
 s_done:	.asciz " done"
 
 	.text
+
+# open_slot(slot rdi): the slot's u16 to 0 (the dispatcher takes a 0 as
+# no job) and its stale reply sequence number to 0, so a program whose
+# numbers start again at 1 is seen as new; then a millisecond for the
+# dispatcher to record the 0.
+open_slot:
+	movq base(%rip), %rax
+	movw $0, OFF_SLOTSEQ(%rax,%rdi,2)
+	shlq $12, %rdi
+	movq $0, OFF_SLOTS + SLOT_REPLY + SR_SEQ(%rax,%rdi)
+	FENCE
+	movl $1000000, %edi
+	call sleep_ns
+	ret
+
 	.globl _start
 _start:
 	movq $1000, count(%rip)
@@ -241,6 +256,8 @@ ping_thread:
 	movq %r12, %rax
 	shlq $12, %rax
 	leaq OFF_SLOTS(%r14,%rax), %r15		# the slot in the window
+	movq %r12, %rdi
+	call open_slot
 	xorl %ebx, %ebx				# seq
 1:	cmpq count(%rip), %rbx
 	jae 8f

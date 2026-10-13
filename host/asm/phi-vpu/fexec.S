@@ -65,6 +65,21 @@ s_pass:	.asciz "fexec: PASS, every run returned rax 12 and zmm0 = 3.0 in all 16 
 s_fail:	.asciz "fexec: FAIL"
 
 	.text
+
+# open_slot(slot rdi): the slot's u16 to 0 (the dispatcher takes a 0 as
+# no job) and its stale reply sequence number to 0, so a program whose
+# numbers start again at 1 is seen as new; then a millisecond for the
+# dispatcher to record the 0.
+open_slot:
+	movq base(%rip), %rax
+	movw $0, OFF_SLOTSEQ(%rax,%rdi,2)
+	shlq $12, %rdi
+	movq $0, OFF_SLOTS + SLOT_REPLY + SR_SEQ(%rax,%rdi)
+	FENCE
+	movl $1000000, %edi
+	call sleep_ns
+	ret
+
 	.globl _start
 _start:
 	movq $1000, count(%rip)
@@ -133,6 +148,8 @@ _start:
 	addq $OFF_SLOTDATA, %rcx
 	addq %rax, %rcx
 	movq %rcx, datap(%rip)
+	movq slot(%rip), %rdi
+	call open_slot
 	# K_LOAD: the blob into this slot's part of LOADAREA, then the request
 	movq slot(%rip), %rdi
 	imulq $FX_LOAD_PER_SLOT, %rdi, %rdi
@@ -157,7 +174,7 @@ _start:
 	call w_str
 	movq slotp(%rip), %rdi
 	movq SLOT_REPLY + SR_EXIT_AUX(%rdi), %rdi
-	call w_hex
+	call w_hexn
 	movl $1, %edi
 	call l_end
 	# the runs
@@ -224,7 +241,7 @@ _start:
 	call w_str
 	movq datap(%rip), %rcx
 	movl SD_REGS_OUT + REGS_ZMM(%rcx), %edi
-	call w_hex
+	call w_hexn
 	leaq s_bad4(%rip), %rsi
 	call w_str
 	movq slotp(%rip), %rcx
