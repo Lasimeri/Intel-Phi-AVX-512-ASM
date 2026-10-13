@@ -1,7 +1,7 @@
 # gen-x86-tables.c: the decoder's tables from iced-x86's listing
 
 ```
-tcc -run tools/gen-x86-tables.c tools/x86-opcodes.txt host/asm/phi512/x86tab.inc host/asm/phi512/x86tab.h
+tcc -run tools/gen-x86-tables.c tools/x86-opcodes.txt host/asm/phi512/x86tab.inc host/asm/phi512/x86tab.h host/asm/phi512/x86mnem.inc
 ```
 
 The listing `tools/x86-opcodes.txt` is written by `avx512-xlate

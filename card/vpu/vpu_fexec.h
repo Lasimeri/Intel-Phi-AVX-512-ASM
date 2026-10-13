@@ -38,6 +38,8 @@
 #define VPU_SD_DEFER       (528u * 1024)          /* 2048 x 128 bytes */
 #define VPU_SD_LAND        (784u * 1024)          /* demand landing, to the MiB's end */
 #define VPU_SD_DEFER_MAX   2048
+#define VPU_FX_SCRATCH_TPOFF 1536                /* fs-relative: the translated code's per-thread scratch (512 bytes) */
+#define VPU_FX_SCRATCH_BYTES 512
 #define VPU_SD_DEFER_BYTES 128
 
 /* Request kinds of the slots. */

@@ -19,3 +19,10 @@ relocation the linker refuses for a shared object).
 The decoder of stage 3 ([`decode.md`](decode.md)) is assembled into the
 library as `p512_decode.o`; its tables (`x86tab.inc`) are included by
 it. `make decode-check` assembles it alone against `tools/decode-check.c`.
+
+## The translator (2026-10-13, later)
+
+`mvex.S`, `xlate.S`, `blob.S` and `xlfn.S` join the library; the link
+has `-z defs`, so an undefined symbol fails the build instead of the
+run (a file-local `card_load_seed` reached the first run as a symbol
+lookup error).

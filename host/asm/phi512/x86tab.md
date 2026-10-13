@@ -5,7 +5,7 @@ Both files are written by `tools/gen-x86-tables.c`
 from the listing `tools/x86-opcodes.txt` and are not edited by hand:
 
 ```
-tcc -run tools/gen-x86-tables.c tools/x86-opcodes.txt host/asm/phi512/x86tab.inc host/asm/phi512/x86tab.h
+tcc -run tools/gen-x86-tables.c tools/x86-opcodes.txt host/asm/phi512/x86tab.inc host/asm/phi512/x86tab.h host/asm/phi512/x86mnem.inc
 ```
 
 `x86tab.inc` is included at the end of [`decode.S`](decode.md) and

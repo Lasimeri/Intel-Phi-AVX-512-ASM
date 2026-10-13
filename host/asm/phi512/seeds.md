@@ -41,3 +41,12 @@ is a fixed number of bytes at the register.
   groups 2 3 0 1 and 1 0 3 2): the VL extracts have no MVEX form.
 - MVEX takes `base + disp32` only, so gcc's `(%r9,%rcx,4)` forms become
   a `lea` into r11 first.
+
+## Retired to a comparison (2026-10-13, later)
+
+The hand-written blobs are no longer the path: `xlfn.S` translates the
+seed's function at its first fault and the record's `SD_ABLOB`,
+`SD_ABLOB_LEN`, `SD_MAP`, `SD_INDEX`, `SD_NINSN` and `SD_REFUSED`
+(`SD_BYTES` 192) hold the result; `PHI512_HANDBLOBS=1` keeps the hand
+blobs (the entry at the blob's start, the loop's registers and the
+operands still from this table, which stage 3's planner replaces next).

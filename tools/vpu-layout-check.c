@@ -114,6 +114,7 @@ int main(void)
 	check("more.mat", offsetof(struct vpu_more, mat), 8);
 	check("sizeof more", sizeof(struct vpu_more), 128);
 	check("VPU_OFF_SCRATCH", VPU_OFF_SCRATCH, 8);
+	check("VPU_FX_SCRATCH_TPOFF", VPU_FX_SCRATCH_TPOFF, 1536);
 	check("VPU_OFF_REQ", VPU_OFF_REQ, 64);
 	check("VPU_OFF_NONCE", VPU_OFF_NONCE, 128);
 	check("VPU_OFF_REPLY", VPU_OFF_REPLY, 256);

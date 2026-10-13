@@ -15,6 +15,7 @@ sa:	.skip SA_BYTES
 	.section .rodata
 s_env_verbose:	.asciz "PHI512_VERBOSE"
 s_env_disable:	.asciz "PHI512_DISABLE"
+s_env_handblobs: .asciz "PHI512_HANDBLOBS"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -54,6 +55,11 @@ phi512_init:
 	call env_set
 	movl %eax, %eax
 	movq %rax, verbose(%rip)
+	leaq s_env_handblobs(%rip), %rdi
+	call env_set
+	movl %eax, %eax
+	movq %rax, handblobs(%rip)
+	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f
 	leaq s_t1(%rip), %rsi

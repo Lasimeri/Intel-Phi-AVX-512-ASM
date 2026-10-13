@@ -227,9 +227,11 @@ card_add:
 # card_load_seed(card rdi, seed index rsi): the seed's blob into the
 # slot's part of LOADAREA, K_LOAD under fn_id = index + 1; eax 0 or the
 # status. Verbose: the blob's card address.
+	.globl card_load_seed
 card_load_seed:
 	pushq %rbx
 	pushq %r12
+	pushq %r13
 	movq %rdi, %rbx
 	movq %rsi, %r12
 	imulq $SD_BYTES, %r12, %rax
@@ -239,8 +241,13 @@ card_load_seed:
 	imulq $FX_LOAD_PER_SLOT_H, %rdi, %rdi
 	addq $OFF_LOADAREA, %rdi
 	addq CD_BASE(%rbx), %rdi
+	movq SD_ABLOB(%rcx), %rsi		# the automatic blob when it exists, else the hand-written one
+	movq SD_ABLOB_LEN(%rcx), %rdx
+	testq %rsi, %rsi
+	jnz 1f
 	movq SD_BLOB(%rcx), %rsi
 	movq SD_BLOB_LEN(%rcx), %rdx
+1:	movq %rdx, %r13
 	call mem_copy
 	movq %rbx, %rdi
 	call card_clear_request
@@ -250,8 +257,7 @@ card_load_seed:
 	movq CD_SLOTP(%rbx), %rdi
 	leaq 1(%r12), %rax
 	movq %rax, SL_FN_ID(%rdi)
-	movq SD_BLOB_LEN(%rcx), %rax
-	movq %rax, SL_ENTRY(%rdi)
+	movq %r13, SL_ENTRY(%rdi)		# the byte count
 	movq %rbx, %rdi
 	movl $K_LOAD, %esi
 	call card_post
@@ -281,7 +287,8 @@ card_load_seed:
 	movl $2, %edi
 	call l_end
 	popq %rax
-8:	popq %r12
+8:	popq %r13
+	popq %r12
 	popq %rbx
 	ret
 	.set FX_LOAD_PER_SLOT_H, 512 * 1024
@@ -491,6 +498,7 @@ card_fexec_post:
 	movq %rsi, %r12
 	movq %rcx, %r14
 	movq %r8, %r15
+	movq %r9, %r13				# the blob offset to enter at
 	movq CD_DATAP(%rbx), %rdi
 	addq $SD_REGS_IN, %rdi
 	movq %rdx, %rsi
@@ -513,7 +521,7 @@ card_fexec_post:
 	divq %r8
 	incq %rax
 	movq %rax, SL_FN_ID(%rcx)
-	movq $0, SL_ENTRY(%rcx)
+	movq %r13, SL_ENTRY(%rcx)
 	movq fexec_threads(%rip), %rax
 	movl %eax, SL_THREADS(%rcx)
 	movl SD_IND(%r12), %eax

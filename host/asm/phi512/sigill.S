@@ -29,6 +29,7 @@ ymm_off:	.skip 8				# where YMM_Hi128 lies in the XSAVE area (CPUID 0xD/2 EBX)
 stat_calls:	.skip 8
 stat_call_ns:	.skip 8
 verbose:	.skip 8
+cur_entry:	.skip 8				# the blob offset the current call enters at
 
 	.section .rodata
 s_unknown1:	.asciz "phi512: SIGILL at "
@@ -83,6 +84,12 @@ phi512_sigill:
 	testq %rax, %rax
 	jz .Lunknown
 	movq %rax, %r13				# the seed
+	movq %r13, %rdi				# translated on first use (xlfn.S); the blob offset of rip
+	movq %r12, %rsi
+	call seed_prepare
+	cmpq $-1, %rax
+	je .Lunknown
+	movq %rax, cur_entry(%rip)
 	leaq file_in(%rip), %rdi
 	movq %rbx, %rsi
 	call file_from_frame
@@ -177,6 +184,7 @@ phi512_sigill:
 	movq (%rcx,%r15,8), %rcx
 	leaq stripe_hi(%rip), %r8
 	movq (%r8,%r15,8), %r8
+	movq cur_entry(%rip), %r9
 	call card_fexec_post
 71:	incq %r15
 	jmp 7b

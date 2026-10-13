@@ -104,3 +104,11 @@ copy from the staging slot, 0 bytes = the page alone) and, for `K_PUSH`,
 `fill_len` = the bytes (within one chunk, 64-aligned, at most 2 MiB): the
 host reads them out of `RESIDENT + entry x 2 MiB`. The request is 352
 bytes. The SLOTSEQ word: `kind << 11 | seq & 0x7ff` (2026-10-13).
+
+## The translated code's scratch (2026-10-13, later)
+
+`VPU_FX_SCRATCH_TPOFF` (1536) and `VPU_FX_SCRATCH_BYTES` (512): the
+fs-relative per-thread area the translated sequences save registers in
+and stage transfers through (`host/asm/phi512/xlate.inc`'s `S_*`
+layout), after the exec context in the slot threads' TLS block; the
+host's blobs encode the offset, the card provides the zeroed block.

@@ -108,7 +108,17 @@
 	.set OPK_FIXED, 3
 	.set SD_ADDR, 112			# resolved: the function's address, 0 until then
 	.set SD_LEN, 120
-	.set SD_BYTES, 128
+# The automatic translation (stage 3): the blob built from the function
+# itself, its rip map (the blob offset per instruction), the index, the
+# instruction count; SD_BLOB above stays the hand-written blob, used
+# under PHI512_HANDBLOBS=1.
+	.set SD_ABLOB, 128
+	.set SD_ABLOB_LEN, 136
+	.set SD_MAP, 144
+	.set SD_INDEX, 152
+	.set SD_NINSN, 160
+	.set SD_REFUSED, 168			# 1: the translation was refused (not tried again)
+	.set SD_BYTES, 192
 # Residency by 64 KiB units: a chunk's entry keeps which units the card
 # holds (RE_FILLED, 32 bits); a need is a chunk and the units a stripe
 # reads (0 for a chunk it only writes: the page without a fill).

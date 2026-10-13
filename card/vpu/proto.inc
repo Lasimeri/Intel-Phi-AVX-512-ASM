@@ -72,6 +72,11 @@
 	.set EXEC_CHUNK, 2097152
 	.set EXEC_THUNK_MAX, 262144
 	.set EXEC_SCRATCH, 512
+# The per-thread scratch area of the translated code (fs-relative, in
+# the slot process threads' TLS block after the exec context):
+# host/asm/phi512/xlate.inc S_* lays it out.
+	.set FX_SCRATCH_TPOFF, 1536
+	.set FX_SCRATCH_BYTES, 512
 	.set EXEC_MAX_RANGES, 64
 	.set EXEC_MAX_PAGES, 64
 	.set EXEC_MAX_THREADS, 64

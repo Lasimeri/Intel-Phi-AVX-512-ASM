@@ -17,3 +17,9 @@ included beside this file, and is checked against `vpu_fexec.h` by
 2026-10-13, later: `RE_FILLED` (the 64 KiB coverage bitmap), `UNIT`,
 `NEED_MAX` 1024 and the need entry (`NQ_*`), `PUSH_MAX` and the push
 entry (`PQ_*`), the card's pending request (`CD_PEND_*`, `CD_POSTED`).
+
+## The seed's automatic translation (2026-10-13, later)
+
+`SD_ABLOB`, `SD_ABLOB_LEN` (the blob `xlfn.S` built), `SD_MAP` (the
+blob offset per index entry), `SD_INDEX`, `SD_NINSN`, `SD_REFUSED`;
+`SD_BYTES` is 192.

@@ -29,3 +29,6 @@ kinds `K_PING` to `K_FLUSH` (9 to 15) and the exits `X_RET` to `X_LIMIT`,
 mirroring [`vpu_fexec.h`](vpu_fexec.md); the legacy words and kinds are
 unchanged. The shared page between the dispatcher and the slot
 processes (`SH_*`) is the card's own and lives in `defs.inc`.
+
+`FX_SCRATCH_TPOFF` (1536) and `FX_SCRATCH_BYTES` (512): the translated
+code's per-thread scratch in the slot threads' TLS block (2026-10-13).

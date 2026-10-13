@@ -111,6 +111,7 @@ seeds:
 	.long R_RSI, 0, OPK_FIXED, 124
 	.long 0, 0, OPK_NONE, 0
 	.quad 0, 0
+	.quad 0, 0, 0, 0, 0, 0, 0, 0
 	.quad s_dot, blob_dot, blob_dot_end - blob_dot, 0x10
 	.long R_RAX, R_RDX, 0, 1
 	.long R_RDI, 4, OPK_READ, 0
@@ -118,6 +119,7 @@ seeds:
 	.long 0, 0, OPK_NONE, 0
 	.long 0, 0, OPK_NONE, 0
 	.quad 0, 0
+	.quad 0, 0, 0, 0, 0, 0, 0, 0
 	.quad s_ints, blob_ints, blob_ints_end - blob_ints, 0x06
 	.long R_RAX, R_RDX, 16, 0
 	.long R_RSI, 4, OPK_READ, 0
@@ -125,4 +127,5 @@ seeds:
 	.long 0, 0, OPK_NONE, 0
 	.long 0, 0, OPK_NONE, 0
 	.quad 0, 0
+	.quad 0, 0, 0, 0, 0, 0, 0, 0
 nseeds:	.quad 3
