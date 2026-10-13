@@ -25,7 +25,9 @@
 	.set WU_SHADOW, 8			# its shadow (64 KiB)
 	.set WU_LO, 16				# the lowest address lines are written back from (the stack unit: below the frame's rsp is the handler's own)
 	.set WU_PAGES, 24			# u16: the mapped 4 KiB pages
-	.set WU_BYTES, 32
+	.set WU_FLO, 32				# a range to refresh whole at the next region (the floor was lowered: the
+	.set WU_FHI, 40				# card may have written below the old floor, which the shadow never saw)
+	.set WU_BYTES, 48
 	.set FAULTS_MAX, 4096
 	.set SEEDS_MAX, 3 + SEEDS_DYN_MAX
 
@@ -70,6 +72,8 @@ s_rg14:	.asciz " address "
 s_rg15:	.asciz " signal|code "
 s_rg16:	.asciz " blob at "
 s_rg18:	.asciz "phi512:   wb "
+s_rg20:	.asciz "phi512:   regs in:  "
+s_rg21:	.asciz "phi512:   regs out: "
 s_rg19:	.asciz ": "
 s_rg17:	.asciz "phi512: registers at the fault (rax rcx rdx rbx rsp rbp rsi rdi r8 to r15): "
 s_rgv1:	.asciz "phi512: unit "
@@ -154,6 +158,26 @@ region_run:
 	call seed_index
 	movq %rax, %rdi
 	call w_dec
+	movl $2, %edi
+	call l_end
+	# (probe) the general registers posted, after the rip
+	call l_begin
+	leaq s_rg20(%rip), %rsi
+	call w_str
+	leaq region_file(%rip), %rdi
+	movq REGS_RIP(%rdi), %rdi
+	call w_hexn
+	leaq s_rg5(%rip), %rsi
+	call w_str
+	xorl %r15d, %r15d
+81:	leaq region_file(%rip), %rdi
+	movq REGS_GPR(%rdi,%r15,8), %rdi
+	call w_hexn
+	leaq s_rg5(%rip), %rsi
+	call w_str
+	incq %r15
+	cmpq $16, %r15
+	jb 81b
 	movl $2, %edi
 	call l_end
 0:	movq $FXF_IDSTACK, fexec_flags(%rip)
@@ -251,6 +275,29 @@ region_run:
 	jmp .Lrg_out
 1:	call wu_writeback
 	movq %rax, 32(%rsp)
+	cmpq $0, verbose(%rip)
+	je 82f
+	# (probe) the general registers as the card left them
+	call l_begin
+	leaq s_rg21(%rip), %rsi
+	call w_str
+	movq CD_DATAP(%rbx), %rdi
+	movq SD_REGS_OUT + REGS_RIP(%rdi), %rdi
+	call w_hexn
+	leaq s_rg5(%rip), %rsi
+	call w_str
+	xorl %r15d, %r15d
+83:	movq CD_DATAP(%rbx), %rdi
+	movq SD_REGS_OUT + REGS_GPR(%rdi,%r15,8), %rdi
+	call w_hexn
+	leaq s_rg5(%rip), %rsi
+	call w_str
+	incq %r15
+	cmpq $16, %r15
+	jb 83b
+	movl $2, %edi
+	call l_end
+82:
 	# the frame from the file, the file kept as the shadow
 	movq %r12, %rdi
 	movq CD_DATAP(%rbx), %rsi
@@ -470,7 +517,21 @@ wu_ensure:
 	movq %rbx, %rax
 7:	testq %r13, %r13
 	jz 71f
-	movq %r13, WU_LO(%rax)
+	movq WU_LO(%rax), %rcx
+	testq %rcx, %rcx
+	jz 72f
+	cmpq %rcx, %r13
+	jae 72f
+	# the floor drops: [new, old) must come whole from the host at the next region
+	cmpq $0, WU_FHI(%rax)
+	je 73f
+	cmpq WU_FLO(%rax), %r13
+	jae 74f
+73:	movq %r13, WU_FLO(%rax)
+74:	cmpq WU_FHI(%rax), %rcx
+	jbe 72f
+	movq %rcx, WU_FHI(%rax)
+72:	movq %r13, WU_LO(%rax)
 71:	xorl %eax, %eax
 	jmp 9f
 8:	movl $1, %eax
@@ -520,7 +581,11 @@ wu_refresh:
 	addq %r15, %rsi
 	movq WU_SHADOW(%rbx), %rdi
 	addq %r15, %rdi
-	xorl %ecx, %ecx
+	cmpq WU_FLO(%rbx), %rax
+	jb 41f
+	cmpq WU_FHI(%rbx), %rax
+	jb 5f					# in the forced range: whole, compared or not
+41:	xorl %ecx, %ecx
 4:	movq (%rsi,%rcx), %rax
 	cmpq (%rdi,%rcx), %rax
 	jne 5f
@@ -544,7 +609,9 @@ wu_refresh:
 	jmp 3b
 7:	incl %r13d
 	jmp 2b
-8:	addq $WU_BYTES, %rbx
+8:	movq $0, WU_FLO(%rbx)
+	movq $0, WU_FHI(%rbx)
+	addq $WU_BYTES, %rbx
 	decq %r12
 	jmp 1b
 9:	popq %r15

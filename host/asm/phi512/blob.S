@@ -39,7 +39,8 @@ s_badmap:	.asciz "a branch target without a map entry"
 	.set F_I, IN_BYTES			# the entry's number
 	.set F_OB, IN_BYTES + 8			# the object
 	.set F_SCR, IN_BYTES + 16		# the scratch register of a re-based operand (-1 none); +8 a slot number
-	.set F_BYTES, IN_BYTES + 32
+	.set F_CMOV, IN_BYTES + 32		# a CMOV: the blob address after its jcc's rel8 (0 none)
+	.set F_BYTES, IN_BYTES + 48
 
 	.globl blob_build
 blob_build:
@@ -144,7 +145,59 @@ blob_build:
 	jb 1f
 	cmpl $0xdf, %eax
 	jbe .Lref_x87
-1:	testb $H_RIPREL, IN_HAS(%rdx)
+1:	movq $0, F_CMOV(%rsp)
+	# the P54C core's gaps: a prefetch, a fence, a clflush and a pause
+	# are dropped; a CMOVcc becomes a jump on the inverse condition over
+	# a mov r, r/m (the card has none of these).
+	cmpb $0, IN_MAP(%rdx)
+	jne 12f
+	cmpb $0x90, IN_OP(%rdx)
+	jne 14f
+	testb $P_F3, IN_PFX(%rdx)
+	jnz .Ladvance				# pause
+	jmp 14f
+12:	cmpb $1, IN_MAP(%rdx)
+	jne 14f
+	movzbl IN_OP(%rdx), %eax
+	cmpl $0x18, %eax
+	je .Ladvance				# prefetch hints
+	cmpl $0x0d, %eax
+	je .Ladvance				# prefetchw
+	cmpl $0xae, %eax
+	jne 13f
+	cmpb $3, IN_MOD(%rdx)
+	je .Ladvance				# lfence, mfence, sfence
+	movzbl IN_MODRM(%rdx), %ecx
+	andl $0x38, %ecx
+	cmpl $0x38, %ecx
+	je .Ladvance				# clflush
+	jmp 14f
+13:	andl $0xf0, %eax
+	cmpl $0x40, %eax
+	jne 14f
+	testb $H_RIPREL, IN_HAS(%rdx)
+	jnz .Lcopy_rip				# (the jcc goes in after the prologue there)
+	call .Lcmov_jcc
+	leaq F_IN(%rsp), %rdx
+	movl IX_OFF(%r14), %eax
+	leaq (%r13,%rax), %rsi
+	movzbl IN_OP_OFF(%rdx), %edx
+	call .Lput				# the prefixes and the REX
+	movl $0x8b, %eax
+	call .Lbyte				# mov r, r/m
+	leaq F_IN(%rsp), %rdx
+	movl IX_OFF(%r14), %eax
+	leaq (%r13,%rax), %rsi
+	movzbl IN_OP_OFF(%rdx), %ecx
+	addq %rcx, %rsi
+	addq $2, %rsi
+	movzbl IX_LEN(%r14), %edx
+	subl %ecx, %edx
+	subl $2, %edx
+	call .Lput				# the ModRM and what follows
+	call .Lcmov_patch
+	jmp .Ladvance
+14:	testb $H_RIPREL, IN_HAS(%rdx)
 	jnz .Lcopy_rip
 	movl IX_OFF(%r14), %eax
 	leaq (%r13,%rax), %rsi
@@ -169,7 +222,15 @@ blob_build:
 	movl %eax, F_SCR(%rsp)
 	call .Lrip_prologue
 	leaq F_IN(%rsp), %rdx
-	movl IX_OFF(%r14), %eax
+	cmpb $1, IN_MAP(%rdx)
+	jne 0f
+	movzbl IN_OP(%rdx), %eax
+	andl $0xf0, %eax
+	cmpl $0x40, %eax
+	jne 0f
+	call .Lcmov_jcc				# a CMOV: the jump over the mov, after the prologue
+	leaq F_IN(%rsp), %rdx
+0:	movl IX_OFF(%r14), %eax
 	leaq (%r13,%rax), %rsi			# the instruction's bytes
 	movzbl IN_OP_OFF(%rdx), %ecx		# the opcode's offset
 	cmpb $0, IN_ENC(%rdx)
@@ -199,8 +260,13 @@ blob_build:
 	call .Lbyte
 	popq %rcx
 	popq %rsi
-3:	# the opcode bytes: from the opcode's offset to the ModRM's
-	leaq F_IN(%rsp), %rdx
+3:	# the opcode bytes: from the opcode's offset to the ModRM's (a CMOV: 8B)
+	cmpq $0, F_CMOV(%rsp)
+	je 31f
+	movl $0x8b, %eax
+	call .Lbyte
+	jmp .Lrip_modrm
+31:	leaq F_IN(%rsp), %rdx
 	addq %rcx, %rsi
 	movzbl IN_MODRM_OFF(%rdx), %edx
 	subl %ecx, %edx
@@ -252,8 +318,33 @@ blob_build:
 	je .Ladvance
 	cmpl $K_IJMP, %eax
 	je .Ladvance
-	call .Lrip_epilogue
+	cmpq $0, F_CMOV(%rsp)
+	je 5f
+	call .Lcmov_patch
+5:	call .Lrip_epilogue
 	jmp .Ladvance
+# .Lcmov_jcc: jcc rel8 on the inverse of the CMOV's condition (its
+# opcode's low nibble xor 1), the rel8 a placeholder whose position
+# F_CMOV keeps; .Lcmov_patch: the rel8 set to reach the blob's current
+# end (after the mov).
+.Lcmov_jcc:
+	movzbl F_IN + IN_OP + 8(%rsp), %eax
+	andl $0xf, %eax
+	xorl $1, %eax
+	orl $0x70, %eax
+	call .Lbyte
+	xorl %eax, %eax
+	call .Lbyte
+	movq BL_OUT(%rbx), %rax
+	movq %rax, F_CMOV + 8(%rsp)
+	ret
+.Lcmov_patch:
+	movq BL_OUT(%rbx), %rax
+	movq F_CMOV + 8(%rsp), %rcx
+	subq %rcx, %rax
+	movb %al, -1(%rcx)
+	movq $0, F_CMOV + 8(%rsp)
+	ret
 # .Lrip_prologue: mov [fs:S_RIPB], r; movabs r, the operand's address
 # (F_SCR the register, F_IN the instruction).
 .Lrip_prologue:

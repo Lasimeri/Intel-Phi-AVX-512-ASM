@@ -3649,6 +3649,8 @@ xl_kunpck:
 	movq %rbx, %rdi
 	call em_rcx
 	movq %rbx, %rdi
+	call em_flags
+	movq %rbx, %rdi
 	xorl %esi, %esi
 	movzbl IN_VVVV(%r12), %edx
 	call em_kmov_r_k			# eax = k2
@@ -3754,6 +3756,8 @@ xl_cmp_q:
 	call em_rax
 	movq %rbx, %rdi
 	call em_rcx
+	movq %rbx, %rdi
+	call em_flags				# the packing arithmetic below sets flags the program keeps
 	EV_LL %edi
 	movl $1, %esi
 	call vl_lanes				# the qword lanes of the length

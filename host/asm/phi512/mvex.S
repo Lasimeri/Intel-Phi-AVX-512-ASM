@@ -1284,6 +1284,8 @@ em_unaligned_any:
 	movq %rbx, %rdi
 	call em_rcx
 	movq %rbx, %rdi
+	call em_flags				# the test below must not reach the program's flags
+	movq %rbx, %rdi
 	movq %r13, %rsi
 	call em_addr_regs			# the operand's rax/rcx as the program has them
 	movq %rbx, %rdi
