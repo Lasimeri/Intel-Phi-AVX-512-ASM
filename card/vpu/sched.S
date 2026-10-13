@@ -24,7 +24,7 @@ meminfo_buf:	.skip 4096
 stats_calls:	.skip 8
 slot_posts:	.skip 4			# slots_poll: posts handed over this call
 sched_last:	.skip 8			# the slot process: the job sequence last served
-sched_t0:	.skip 8
+sched_t0:	.skip 16
 
 	.section .rodata
 s_meminfo:	.asciz "/proc/meminfo"
@@ -93,9 +93,9 @@ slots_start:
 	movl nslots(%rip), %r12d
 	movl slot_cores(%rip), %eax
 	imull %r12d, %eax
-	cmpl $NCORES - 1, %eax
+	cmpl $NCORES, %eax
 	jle 2f
-	movl $NCORES - 1, %eax
+	movl $NCORES, %eax
 	xorl %edx, %edx
 	divl slot_cores(%rip)
 	movl %eax, %r12d
@@ -129,10 +129,16 @@ slots_start:
 	movq %rax, SH_SLOT0 + SH_PID(%rbx,%rcx)
 	incl %r13d
 	jmp 3b
-5:	# this process's pool: the cores after the slots'
+5:	# this process's pool: the cores after the slots'; when the slots
+	# took every core (-S 1 -C 57: a single-threaded program's whole
+	# card) it keeps the last core beside them, where its threads sleep
+	# on a futex until a legacy job comes
 	movl slot_cores(%rip), %eax
 	imull %r12d, %eax
-	movl %eax, core_base(%rip)
+	cmpl $NCORES - 1, %eax
+	jle 51f
+	movl $NCORES - 1, %eax
+51:	movl %eax, core_base(%rip)
 	movl $NCORES, %ecx
 	subl %eax, %ecx
 	movl %ecx, core_count(%rip)
@@ -459,7 +465,44 @@ sched_main:
 	je 12f
 	cmpl $K_RESIDENT, %eax
 	je 14f
+	cmpl $K_PUSH, %eax
+	je 15f
+	cmpl $K_FLUSH, %eax
+	je 16f
 	movl $E_KERNEL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+16:	call res_flush				# K_FLUSH: the session's residency dropped
+	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
+	jmp 1f
+15:	# K_PUSH: entry bytes of the program's memory at fn_id, in lines,
+	# into this slot's SD_WB (the pages must be resident here)
+	call res_map_all
+	movq slreq + SL_ENTRY(%rip), %rdx
+	testq %rdx, %rdx
+	jz 151f
+	cmpq $SD_WB_BYTES, %rdx
+	ja 151f
+	testq $63, %rdx
+	jnz 151f
+	movq slreq + SL_FN_ID(%rip), %rsi
+	testq $63, %rsi
+	jnz 151f
+	call now_ns				# clobbers rcx, rdx, rsi, rdi, r11: before the operands
+	movq %rax, sched_t0 + 8(%rip)
+	movq slreq + SL_ENTRY(%rip), %rdx
+	shrq $6, %rdx
+	movq slreq + SL_FN_ID(%rip), %rsi
+	movq %r12, %rdi
+	shlq $20, %rdi
+	addq $OFF_SLOTDATA + SD_WB, %rdi
+	addq window(%rip), %rdi
+	call phi_copy64
+	call now_ns
+	subq sched_t0 + 8(%rip), %rax
+	movq %rax, reply_buf + SR_WB_NS(%rip)
+	movl $1, reply_buf + SR_WB_N(%rip)
+	jmp 1f
+151:	movl $E_REQUEST, reply_buf + SR_STATUS(%rip)
 	jmp 1f
 14:	# K_RESIDENT: the page the dispatcher assigned, its fill waited for
 	movl SH_RES_IDX(%r13), %edi

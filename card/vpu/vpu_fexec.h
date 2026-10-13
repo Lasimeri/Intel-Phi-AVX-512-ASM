@@ -47,8 +47,10 @@
 #define VPU_K_RESIDENT 12    /* chunks of the program's memory, pulled by DMA and mapped at identity */
 #define VPU_K_FEXEC    13    /* run a function instance */
 #define VPU_K_RESUME   14    /* continue the slot's instance after an exit */
-#define VPU_K_FLUSH    15    /* drop the slot's private mappings */
-#define VPU_K_LAST     15
+#define VPU_K_FLUSH    15    /* the session's end: the pool pages back, the residency table emptied; exit_aux = pages returned */
+#define VPU_K_PUSH     16    /* fn_id = a program address, entry = bytes (64-aligned, at most VPU_SD_WB_BYTES): copied from the card's memory into SD_WB */
+#define VPU_K_LAST     16
+#define VPU_SD_WB_BYTES (VPU_SD_DEFER - VPU_SD_WB)
 
 /* How a function instance left the card (reply.exit_kind). */
 #define VPU_X_RET        0

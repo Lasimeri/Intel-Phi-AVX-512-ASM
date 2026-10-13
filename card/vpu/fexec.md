@@ -59,3 +59,22 @@ so a bug in this file ends the slot process the normal way (the card's
 runs a three-instruction blob (an MVEX `vaddps`, a `lea`, `ret`) and
 checks the file; the numbers are in the stage 2 record under
 `docs/results/`.
+
+## An instance split over the slot's pool (2026-10-13, later)
+
+A `K_FEXEC` whose request carries a split (`ind_reg`, `bound_reg`,
+`step` not 0) runs as `threads` slices (at most the slot's pool plus
+this thread: 114 with `-C 57 -T 2`): the landed file is kept in
+`fx_base`, each slice's context (`fx_ctx`, one per thread, 2304 bytes)
+is a copy with the counter register at the slice's first element and
+the bound register at its last plus one (the elements divided evenly,
+rounded up to a step; a slice past the end is marked returned and
+skipped), its own run stack (`FX_STACK` each, `(MAX_POOL + 1)` of them)
+with the return stub on top, and `fx_slice` enters it through `fx_enter`
+on its pool thread (`vpu_pool_map`; the last slice on this thread). The
+exit is the first slice's that did not return normally, else `X_RET`;
+the file out is the last slice's; `threads_ran` says how many ran. A
+step of 0 is one slice with the file as it is (no split), run on this
+thread without waking the pool (5 ms when it has parked). With
+`-s 1000` the pool spins a second after a job, so a session's requests
+find it awake.

@@ -96,8 +96,16 @@
 
 	.bss
 	.balign 4096
-fx_ctx:	.skip CTX_BYTES
+fx_ctx:	.skip (MAX_POOL + 1) * CTX_BYTES	# a context per thread of the slot: slice s at s * CTX_BYTES
 	.balign 64
+fx_base:	.skip CTX_BYTES			# the file as landed, copied per slice
+fx_lo:	.skip 8				# the split: the counter's first value, the bound, the step, the slices
+fx_hi:	.skip 8
+fx_step:	.skip 8
+fx_per:	.skip 8
+fx_rip:	.skip 8
+fx_ind_reg:	.skip 8
+fx_bound_reg:	.skip 8
 fx_tab:	.skip FX_TAB_MAX * FT_BYTES
 fx_ntab:	.skip 8
 fx_arena:	.skip 8
@@ -130,7 +138,7 @@ fexec_init:
 	ja .Lfx_mmap_fail
 	movq %rax, fx_arena(%rip)
 	xorl %edi, %edi
-	movl $FX_STACK, %esi
+	movq $(MAX_POOL + 1) * FX_STACK, %rsi		# a run stack per thread of the slot
 	movl $PROT_READ | PROT_WRITE, %edx
 	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, %r10d
 	movq $-1, %r8
@@ -281,6 +289,7 @@ fexec_run:
 	pushq %r13
 	pushq %r14
 	pushq %r15
+	subq $16, %rsp
 	movq %rdi, %rbx
 	movl %esi, %r12d
 	movq %rdx, %r13
@@ -301,59 +310,115 @@ fexec_run:
 	jae .Lfr_request
 	addq FT_ADDR(%rcx), %rax
 	movq %rax, %r15				# rip
-	# the register file: REGS_BYTES from the landing area
-	leaq fx_ctx(%rip), %rdi
+	# the register file as landed, kept for every slice
+	leaq fx_base(%rip), %rdi
 	movq %r14, %rsi
 	movl $REGS_BYTES / 64 + 1, %edx
 	call phi_copy64
-	leaq fx_ctx(%rip), %rdi
-	movq %r15, CTX_REGS + REGS_RIP(%rdi)
-	# the run stack: the return stub's address on top
-	movq fx_stack(%rip), %rax
-	addq $FX_STACK - 64, %rax
-	leaq fx_ret_stub(%rip), %rcx
-	movq %rcx, (%rax)
-	movq %rax, CTX_REGS + REGS_GPR + 32(%rdi)
-	movl $0, CTX_KIND(%rdi)
-	movq $0, CTX_FAULT(%rdi)
-	movq %rdi, %fs:TE_CTX
-	movq $1, fx_in_run(%rip)
+	movq %r15, fx_rip(%rip)
+	# the split: threads (the request's, at most this slot's pool plus
+	# this thread), over [counter, bound) in steps of step; a step of 0
+	# is one slice
+	movl SL_THREADS(%rbx), %r14d
+	testl %r14d, %r14d
+	jnz 21f
+	movl $1, %r14d
+21:	movl nthreads(%rip), %eax
+	incl %eax
+	cmpl %eax, %r14d
+	jbe 22f
+	movl %eax, %r14d
+22:	movq SL_STEP(%rbx), %rax
+	movq %rax, fx_step(%rip)
+	testq %rax, %rax
+	jnz 23f
+	movl $1, %r14d				# not split: the file runs as it is
+	movq $0, fx_lo(%rip)
+	movq $0, fx_hi(%rip)
+	movq $0, fx_per(%rip)
+	jmp 25f
+23:	movl SL_IND_REG(%rbx), %eax
+	andl $15, %eax
+	movq %rax, fx_ind_reg(%rip)
+	movq fx_base + REGS_GPR(,%rax,8), %rcx
+	movq %rcx, fx_lo(%rip)
+	movl SL_BOUND_REG(%rbx), %eax
+	andl $15, %eax
+	movq %rax, fx_bound_reg(%rip)
+	movq fx_base + REGS_GPR(,%rax,8), %rdx
+	movq %rdx, fx_hi(%rip)
+	movq %rdx, %rax
+	subq %rcx, %rax
+	jg 24f
+	movl $1, %r14d				# nothing to split
+	xorl %eax, %eax
+24:	xorl %edx, %edx
+	divq %r14				# elements a slice, rounded up to a step
+	addq fx_step(%rip), %rax
+	decq %rax
+	xorl %edx, %edx
+	divq fx_step(%rip)
+	imulq fx_step(%rip), %rax
+	movq %rax, fx_per(%rip)
+25:	movq $1, fx_in_run(%rip)
 	call now_ns
-	movq %rax, %r14
-	leaq fx_ctx(%rip), %rdi
-	call fx_enter
-	call now_ns
-	subq %r14, %rax
+	movq %rax, 8(%rsp)
+	cmpl $1, %r14d
+	jne 241f
+	xorl %edi, %edi				# one slice: this thread, no pool wake
+	xorl %esi, %esi
+	movl $1, %edx
+	call fx_slice
+	jmp 242f
+241:	leaq fx_slice(%rip), %rdi
+	xorl %esi, %esi
+	movl %r14d, %edx
+	call vpu_pool_map
+242:	call now_ns
+	subq 8(%rsp), %rax
 	movq %rax, SR_RUN_NS(%r13)
 	movq $0, fx_in_run(%rip)
 	movq $0, %fs:TE_CTX
-	# the exit, and the register file out
-	leaq fx_ctx(%rip), %rcx
-	movl CTX_KIND(%rcx), %eax
-	cmpl $CTX_KIND_STUB, %eax
-	jne 3f
-	movl $X_RET, %eax
-	# the stub kept the raw flags: into the file
-	movq CTX_FLAGS_RAW(%rcx), %rdx
-	movq %rdx, CTX_REGS + REGS_RFLAGS(%rcx)
-3:	movl %eax, SR_EXIT_KIND(%r13)
-	movq CTX_REGS + REGS_RIP(%rcx), %rax
+	# the exit: the first slice that did not return normally, else X_RET;
+	# the file out is the last slice's (this thread's)
+	movl $X_RET, SR_EXIT_KIND(%r13)
+	xorl %ecx, %ecx
+28:	cmpl %r14d, %ecx
+	jae 27f
+	movq %rcx, %rax
+	imulq $CTX_BYTES, %rax, %rax
+	leaq fx_ctx(%rip), %rdx
+	addq %rax, %rdx
+	cmpl $CTX_KIND_STUB, CTX_KIND(%rdx)
+	je 26f
+	movl CTX_KIND(%rdx), %eax
+	movl %eax, SR_EXIT_KIND(%r13)
+	movq CTX_REGS + REGS_RIP(%rdx), %rax
 	movq %rax, SR_EXIT_RIP(%r13)
-	movq CTX_FAULT(%rcx), %rax
+	movq CTX_FAULT(%rdx), %rax
 	movq %rax, SR_EXIT_AUX(%r13)
+	jmp 27f
+26:	incl %ecx
+	jmp 28b
+27:	leal -1(%r14d), %eax
+	imulq $CTX_BYTES, %rax, %rsi
+	leaq fx_ctx(%rip), %rax
+	addq %rax, %rsi				# the last slice's context
+	movq CTX_FLAGS_RAW(%rsi), %rax
+	movq %rax, CTX_REGS + REGS_RFLAGS(%rsi)
 	movq %r12, %rdi
 	shlq $20, %rdi
 	addq $OFF_SLOTDATA + SD_REGS_OUT, %rdi
 	addq window(%rip), %rdi
-	leaq fx_ctx(%rip), %rsi
 	movl $REGS_BYTES / 64 + 1, %edx
 	call phi_copy64
-	movl $1, SR_THREADS_RAN(%r13)
+	movl %r14d, SR_THREADS_RAN(%r13)
 	xorl %eax, %eax
 	jmp 9f
 .Lfr_request:
 	movl $E_REQUEST, %eax
-9:	popq %r15
+9:	addq $16, %rsp
+	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12
@@ -544,4 +609,60 @@ fx_sig_default:
 	movl $SIGSET_BYTES, %r10d
 	SYS SYS_rt_sigaction
 	addq $SA_BYTES, %rsp
+	ret
+
+# fx_slice(arg rdi, slice esi, nslices edx): one slice of the instance on
+# this thread: its context is the landed file with the counter and bound
+# registers at the slice's range, rip the entry, rsp this thread's own
+# run stack with the return stub on top; then fx_enter. A slice past the
+# end (fewer elements than slices) is marked returned and skipped.
+fx_slice:
+	pushq %rbx
+	pushq %r12
+	movl %esi, %r12d
+	movq %r12, %rbx
+	imulq $CTX_BYTES, %rbx, %rbx
+	leaq fx_ctx(%rip), %rax
+	addq %rax, %rbx				# this slice's context
+	movq %rbx, %rdi
+	leaq fx_base(%rip), %rsi
+	movl $REGS_BYTES / 64 + 1, %edx
+	call phi_copy64
+	# the range: lo + s * per .. min(lo + (s + 1) * per, hi)
+	movq fx_per(%rip), %rax
+	imulq %r12, %rax
+	addq fx_lo(%rip), %rax
+	movq %rax, %rcx
+	addq fx_per(%rip), %rcx
+	cmpq fx_hi(%rip), %rcx
+	jbe 1f
+	movq fx_hi(%rip), %rcx
+1:	movl $CTX_KIND_STUB, CTX_KIND(%rbx)
+	cmpq $0, fx_step(%rip)
+	je 2f					# not split: the file as it is
+	cmpq %rcx, %rax
+	jae 9f					# empty: nothing to run
+	movq %rax, %r8
+	movq %rcx, %r9
+	movq fx_ind_reg(%rip), %rax
+	movq %r8, CTX_REGS + REGS_GPR(%rbx,%rax,8)
+	movq fx_bound_reg(%rip), %rax
+	movq %r9, CTX_REGS + REGS_GPR(%rbx,%rax,8)
+2:	movq fx_rip(%rip), %rax
+	movq %rax, CTX_REGS + REGS_RIP(%rbx)
+	movq %r12, %rax
+	imulq $FX_STACK, %rax, %rax
+	addq fx_stack(%rip), %rax
+	addq $FX_STACK - 64, %rax
+	leaq fx_ret_stub(%rip), %rcx
+	movq %rcx, (%rax)
+	movq %rax, CTX_REGS + REGS_GPR + 32(%rbx)
+	movl $0, CTX_KIND(%rbx)
+	movq $0, CTX_FAULT(%rbx)
+	movq %rbx, %fs:TE_CTX
+	movq %rbx, %rdi
+	call fx_enter
+	movq $0, %fs:TE_CTX
+9:	popq %r12
+	popq %rbx
 	ret

@@ -254,7 +254,9 @@
 	.set K_FEXEC, 13
 	.set K_RESUME, 14
 	.set K_FLUSH, 15
-	.set K_LAST, 15
+	.set K_PUSH, 16
+	.set K_LAST, 16
+	.set SD_WB_BYTES, SD_DEFER - SD_WB
 # How a function instance left the card.
 	.set X_RET, 0
 	.set X_CALL, 1

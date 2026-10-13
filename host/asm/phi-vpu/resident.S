@@ -158,6 +158,11 @@ _start:
 	movq %rcx, datap(%rip)
 	movq slot(%rip), %rdi
 	call open_slot
+	# K_FLUSH: the previous program's residency dropped (the pool is
+	# finite and nothing evicts yet)
+	call clear_request
+	movl $K_FLUSH, %esi
+	call post_and_wait
 	# staging chunk 0: float i at dword i (the sums stay normal numbers);
 	# chunk 1: zeros
 	movq base(%rip), %rdi

@@ -151,3 +151,13 @@ it did, and sums the slots' counters into `OFF_STATS` every 64 polls
 every poll. With `-S 0` nothing of this runs. `-R pages` (0) is the pool
 of huge pages for the program's memory ([`resident.md`](resident.md)),
 mapped before the fork.
+
+## A whole card for one slot (2026-10-13, later)
+
+`-S 1 -C 57` is allowed: the slot takes every core and the wide pool
+keeps core 56 beside it, where its threads sleep on a futex until a
+legacy job comes (the clamp used to reduce such a request to 0 slots).
+The pool parks on a futex after `-s MS` of idleness and a wake costs
+about 5 ms, so a session of many short requests runs the worker with
+`-s 1000`: `scripts/phi512.sh` starts it as `-S 1 -C 57 -T 2 -R 128 -s
+1000` under `PHI512_V3=1`.

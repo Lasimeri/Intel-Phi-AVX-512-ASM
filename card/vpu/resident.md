@@ -66,3 +66,15 @@ back.
 - The host side: the preload library's residency table and placement
   (stage 2's third increment); today `host/asm/phi-vpu/resident.S` drives
   it by hand.
+
+## The session's end: `res_flush` (2026-10-13, later)
+
+`K_FLUSH` (the host opening a slot for a new program) moves every pool
+page this process placed back to its pool address and empties the
+shared table: address, state, class and sequence of every entry
+cleared, the frame (`RT_PHYS`, read once from pagemap at `res_init`)
+kept. A first version zeroed the entries whole, and every later fill
+was a DMA to physical address 0: the pages stayed zero and the program
+computed on zeros without a fault. `res_pull` now refuses an entry
+without a frame. With several slot processes each would need to see
+the flush (a generation in the table): not yet, one slot a card today.

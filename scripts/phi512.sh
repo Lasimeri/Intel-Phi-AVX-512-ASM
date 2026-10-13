@@ -68,9 +68,15 @@ if [ -z "$lib" ] && [ -z "$installed" ] && [ -d "$root/host/target" ]; then
     # checkout when it names another.
     cache="${XDG_CACHE_HOME:-$HOME/.cache}/intel-phi-avx512"
     if [ "$(readlink "$cache" 2>/dev/null)" != "$root" ]; then ln -sfn "$root" "$cache"; fi
-    for cand in "$cache/host/target/release/libphi512.so" "$cache/host/target/debug/libphi512.so"; do
-        [ -f "$cand" ] && { lib="$cand"; break; }
-    done
+    # PHI512_V3=1: the assembly preload of the restart (host/asm/phi512),
+    # beside the Rust one until stage 3 replaces it.
+    if [ -n "${PHI512_V3:-}" ]; then
+        [ -f "$cache/host/target/release/libphi512-asm.so" ] && lib="$cache/host/target/release/libphi512-asm.so"
+    else
+        for cand in "$cache/host/target/release/libphi512.so" "$cache/host/target/debug/libphi512.so"; do
+            [ -f "$cand" ] && { lib="$cand"; break; }
+        done
+    fi
 fi
 [ -n "$lib" ] || { [ -f /usr/lib/libphi512.so ] && lib=/usr/lib/libphi512.so; }
 [ -n "$lib" ] || { echo "$0: libphi512.so not found; run 'make build' or scripts/phi512-install.sh" >&2; exit 1; }
@@ -100,7 +106,8 @@ else
         # SPLIT_THREADS) and copies through the window one core at a time,
         # so a second thread per core only polls beside them (the default,
         # 114, is the matrix multiplies'; card/vpu/vpu_worker.md).
-        "$root/scripts/phi-vpu.sh" -c "$card" start 57 >&2 </dev/null || {
+        # (the restart's preload needs slots and a pool: -S 12 -C 4 -R 64.)
+        PHI_VPU_ARGS="${PHI_VPU_ARGS:-${PHI512_V3:+-S 1 -C 57 -T 2 -R 128 -s 1000}}" "$root/scripts/phi-vpu.sh" -c "$card" start 57 >&2 </dev/null || {
             echo "phi512: could not start the worker on card $card (is the card up? phi -c $card status)" >&2
             exit 1
         }

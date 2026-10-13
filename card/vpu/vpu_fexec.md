@@ -87,3 +87,12 @@ the card asking (`addr`, `len`, `seq`) and the host answering (`ack`,
 
 The progress word at 3136 is `defer_n`, card-written while an instance
 runs, for the progressive deferred lists of stage 5.
+
+## K_PUSH, K_FLUSH (2026-10-13, later)
+
+`K_PUSH` (16): `fn_id` = a program address (64-aligned), `entry` = bytes
+(64-aligned, at most `VPU_SD_WB_BYTES`, 240 KiB): the slot copies them
+from its view of the program's memory into `SD_WB`; the reply's `wb_n`
+is 1 and `wb_ns` the copy's time. `K_FLUSH` (15): the session's end,
+the residency dropped ([`resident.md`](resident.md)); `exit_aux` = the
+pages this slot gave back.

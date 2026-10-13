@@ -75,7 +75,9 @@ page it has not placed yet to the program's address (`res_map_all`),
 and after the run `wb_ranges` copies the request's declared ranges
 (`SL_WB_N` of `{addr, len}` in `SD_WB_TAB`, 64-byte aligned) into
 `SD_WB`. A u16 of 0 is a host opening the slot (its sequence numbers
-start again): recorded, no job.
+start again): recorded, no job. `K_PUSH` copies bytes of the program's
+memory from this slot's view into `SD_WB`; `K_FLUSH` calls
+`res_flush` ([`resident.md`](resident.md)).
 
 ## What it costs
 

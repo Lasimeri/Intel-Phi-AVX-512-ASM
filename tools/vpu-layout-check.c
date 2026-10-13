@@ -157,6 +157,8 @@ int main(void)
 	check("VPU_K_FEXEC", VPU_K_FEXEC, 13);
 	check("VPU_K_RESUME", VPU_K_RESUME, 14);
 	check("VPU_K_FLUSH", VPU_K_FLUSH, 15);
+	check("VPU_K_PUSH", VPU_K_PUSH, 16);
+	check("VPU_SD_WB_BYTES", VPU_SD_WB_BYTES, 240u * 1024);
 	check("VPU_X_LOOP", VPU_X_LOOP, 6);
 	check("VPU_X_LIMIT", VPU_X_LIMIT, 8);
 	check("sizeof(vpu_slot_req)", sizeof(struct vpu_slot_req), 336);

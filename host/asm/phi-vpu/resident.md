@@ -22,3 +22,6 @@ The worker must have a pool (`PHI_VPU_ARGS="-S 12 -C 4 -R 64"`). Output:
 the two chunks' pool indices and times, the blob's address, one line
 with the runs' min, median, p99 and max, and `PASS` or `FAIL`. Built by
 [`build.md`](build.md).
+
+The test now posts `K_FLUSH` first (2026-10-13): the previous program's
+residency is dropped, so the two chunks always get pool pages.

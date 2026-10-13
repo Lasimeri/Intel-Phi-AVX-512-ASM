@@ -52,7 +52,7 @@ static int host_has_avx512(void)
 
 /* ---- the AVX-512 kernels: what a program compiled for AVX-512 does ---- */
 
-static void poly_avx512(float *out, const float *x, const float *coef, long n)
+__attribute__((noinline)) static void poly_avx512(float *out, const float *x, const float *coef, long n)
 {
     for (long i = 0; i < n; i += LANES) {
         __m512 v = _mm512_loadu_ps(x + i);
@@ -63,7 +63,7 @@ static void poly_avx512(float *out, const float *x, const float *coef, long n)
     }
 }
 
-static float dot_avx512(const float *a, const float *b, long n)
+__attribute__((noinline)) static float dot_avx512(const float *a, const float *b, long n)
 {
     __m512 acc = _mm512_setzero_ps();
     for (long i = 0; i < n; i += LANES)
@@ -73,7 +73,7 @@ static float dot_avx512(const float *a, const float *b, long n)
 
 /* out[i] = in[i] + 7 where in[i] is even, in[i] * 3 where odd: a compare
  * into a mask register and two masked operations. */
-static void ints_avx512(int32_t *out, const int32_t *in, long n)
+__attribute__((noinline)) static void ints_avx512(int32_t *out, const int32_t *in, long n)
 {
     const __m512i one = _mm512_set1_epi32(1), seven = _mm512_set1_epi32(7), three = _mm512_set1_epi32(3);
     for (long i = 0; i < n; i += LANES) {

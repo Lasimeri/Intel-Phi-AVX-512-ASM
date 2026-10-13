@@ -201,6 +201,11 @@ res_pull:
 	movq %rbx, %rcx
 	shlq $5, %rcx
 	movq RT_PHYS(%rax,%rcx), %r13		# the destination frame
+	testq %r13, %r13
+	jnz 0f
+	xorl %eax, %eax				# no frame: never a DMA to physical 0
+	jmp 9f
+0:
 	xorl %r14d, %r14d			# done
 1:	cmpq $HUGE_BYTES, %r14
 	jae 3f
@@ -308,6 +313,59 @@ res_map_all:
 	jmp 10f
 9:	movl $-1, %eax
 10:	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# res_flush: the session's end (K_FLUSH, a host program opening a slot):
+# every pool page this process placed goes back to its pool address, the
+# shared table is emptied (every entry free, address 0). One slot process
+# at a time uses the pool today; with several, each must see the flush
+# (a generation in the table: not yet). eax the pages returned.
+	.globl res_flush
+res_flush:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	xorl %ebx, %ebx
+	xorl %r13d, %r13d
+1:	cmpq res_n(%rip), %rbx
+	jae 8f
+	leaq res_mapped(%rip), %rax
+	btq %rbx, (%rax)
+	jnc 7f
+	movq res_table(%rip), %rcx
+	movq %rbx, %rdx
+	shlq $5, %rdx
+	movq RT_ADDR(%rcx,%rdx), %rdi		# from the program address
+	movl $HUGE_BYTES, %esi
+	movl $HUGE_BYTES, %edx
+	movl $MREMAP_MAYMOVE | MREMAP_FIXED, %r10d
+	movq res_pool(%rip), %r8
+	movq %rbx, %rax
+	shlq $21, %rax
+	addq %rax, %r8				# back to its pool address
+	SYS SYS_mremap
+	leaq res_mapped(%rip), %rax
+	btrq %rbx, (%rax)
+	incl %r13d
+7:	incq %rbx
+	jmp 1b
+8:	# every entry free: address, state, class and sequence cleared; the
+	# frame (RT_PHYS, read once at res_init) stays, it is the page's
+	movq res_table(%rip), %rcx
+	xorl %edx, %edx
+81:	cmpq res_n(%rip), %rdx
+	jae 82f
+	movq %rdx, %rax
+	shlq $5, %rax
+	movq $0, RT_ADDR(%rcx,%rax)
+	movq $0, RT_STATE(%rcx,%rax)		# state and class
+	movq $0, RT_SEQ(%rcx,%rax)
+	incq %rdx
+	jmp 81b
+82:	movl %r13d, %eax
+	popq %r13
 	popq %r12
 	popq %rbx
 	ret
