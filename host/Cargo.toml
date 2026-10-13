@@ -33,7 +33,7 @@ libc = "0.2"
 cc = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel", "op_code_info"] }
 object = { version = "0.36", default-features = false, features = ["std", "read", "elf"] }
 
 [profile.release]

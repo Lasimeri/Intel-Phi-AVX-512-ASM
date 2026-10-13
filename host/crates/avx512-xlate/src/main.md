@@ -57,3 +57,14 @@ list with its sources.
   increment first. `rsp` and `r12` cannot be the base for the same reason.
 - The instruction table is a subset of AVX-512F, not all of it. Everything
   outside it is refused by name.
+
+## Two subcommands for the assembly decoder (2026-10-13)
+
+- `avx512-xlate --gen-opcodes OUT` writes the listing of every
+  instruction code iced-x86 knows (64-bit mode, legacy, VEX, EVEX, no
+  decoder option) from `OpCodeInfo`: `tools/x86-opcodes.txt`, the
+  source of `host/asm/phi512/x86tab.inc` through
+  `tools/gen-x86-tables.c` ([`../../../../tools/gen-x86-tables.md`](../../../../tools/gen-x86-tables.md)).
+- `avx512-xlate --dump ELF` prints iced's decoding of the file's `.text`,
+  one line per instruction, the reference `tools/decode-check.c` diffs
+  the assembly decoder against ([`../../../../tools/decode-check.md`](../../../../tools/decode-check.md)).

@@ -46,7 +46,15 @@ layout-check: ## Compare the C protocol layout with the Rust and assembly consta
 mvex-check: ## The knc-mvex copy matches the stack's (skipped when the stack is not found)
 	scripts/mvex-sync.sh
 
-check: docs-check fmt clippy build test layout-check mvex-check ## Everything CI would run
+decode-check: build ## The assembly x86-64 decoder against iced-x86 on the translator binary itself (host/asm/phi512/decode.S, tools/decode-check.c)
+	mkdir -p host/asm/out
+	as --64 -I host/asm/phi512 -o host/asm/out/p512_decode.o host/asm/phi512/decode.S
+	gcc -O2 -o host/asm/out/decode-check tools/decode-check.c host/asm/out/p512_decode.o
+	host/target/release/avx512-xlate --dump host/target/release/avx512-xlate > host/asm/out/decode-iced.dump
+	host/asm/out/decode-check host/target/release/avx512-xlate > host/asm/out/decode-asm.dump
+	@if cmp -s host/asm/out/decode-iced.dump host/asm/out/decode-asm.dump; then echo "decode-check: $$(wc -l < host/asm/out/decode-asm.dump) instructions identical to iced"; else diff host/asm/out/decode-iced.dump host/asm/out/decode-asm.dump | head -20; echo "decode-check: the decoder differs from iced"; exit 1; fi
+
+check: docs-check fmt clippy build test layout-check mvex-check decode-check ## Everything CI would run
 
 clean: ## Remove build outputs
 	cd $(HOST) && cargo clean
