@@ -422,6 +422,8 @@ make_resident:
 	movq %rbx, SL_FN_ID(%rdi)
 	movq %r12, SL_ENTRY(%rdi)
 	movl %r13d, SL_THREADS(%rdi)
+	movq $0, SL_FILL_OFF(%rdi)		# the whole chunk filled
+	movq $CHUNK, SL_FILL_LEN(%rdi)
 	movl $K_RESIDENT, %esi
 	call post_and_wait
 	testq %rax, %rax
@@ -510,9 +512,9 @@ post_and_wait:
 	call now_ns
 	movq %rax, %r13
 	movq seq(%rip), %rax
-	andl $0xfff, %eax
+	andl $0x7ff, %eax
 	movl %r12d, %ecx
-	shll $12, %ecx
+	shll $11, %ecx
 	orl %ecx, %eax
 	movq base(%rip), %rcx
 	movq slot(%rip), %rdx

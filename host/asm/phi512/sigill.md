@@ -52,3 +52,14 @@ call at a time (no lock: a single-threaded program). The frame's
 register file is 2256 bytes; the handler's own frame 64 bytes plus the
 file in `.bss` (`file_in`), so a program with several threads faulting
 at once would race on it: stage 4's per-thread slots.
+
+## Rounds (2026-10-13, later)
+
+The handler queues every stripe's needs on its card (`stripe_needs`: the
+units each read operand covers, a page for each written one, merged per
+chunk; up to `NEED_MAX` 1024 a card, an overflow fails the call with step
+code 2 before anything runs) and the written ranges (`stripe_pushes`),
+then `resident_rounds` posts one `K_RESIDENT` per card and waits for each,
+round after round, the instances follow, and `push_rounds` fetches the
+outputs the same way. The verbose line carries the phases: resident, run,
+push, and the longest card run of the call.

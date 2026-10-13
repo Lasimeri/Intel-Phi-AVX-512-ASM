@@ -84,6 +84,8 @@ struct vpu_slot_req {
     uint32_t defer_cap;
     uint32_t wb_n;             /* write-back ranges in SD_WB_TAB ({addr, len}, 64-byte aligned and sized) */
     uint32_t wb_bytes;         /* their bytes together */
+    uint64_t fill_off;         /* K_RESIDENT: the range of the chunk to fill from the staging slot */
+    uint64_t fill_len;         /* (0: the page only, nothing copied) */
 };
 
 /* The reply, at VPU_SLOT_REPLY: the fields, then seq last. */
@@ -118,7 +120,7 @@ struct vpu_slot_mail {
 #define VPU_SLOT_MAIL     3072
 #define VPU_SLOT_PROGRESS 3136   /* uint64_t defer_n, card-written while an instance runs */
 
-_Static_assert(sizeof(struct vpu_slot_req) == 336, "slot request layout is shared with the card and the preload");
+_Static_assert(sizeof(struct vpu_slot_req) == 352, "slot request layout is shared with the card and the preload");
 _Static_assert(sizeof(struct vpu_slot_reply) == 88, "slot reply layout is shared");
 _Static_assert(sizeof(struct vpu_slot_mail) == 40, "slot mail layout is shared");
 

@@ -40,8 +40,9 @@ reached (the loop in `exit_aux`), a full deferred list, a limit.
 ## The doorbell's u16
 
 The u16 a host thread writes at `448 + 2 slot` carries the kind in its
-top four bits and the request's sequence number in the low twelve
-(`(kind << 12) | (seq & 0xfff)`): the dispatcher reads the kind from it
+top five bits and the request's sequence number in the low eleven
+(`(kind << 11) | (seq & 0x7ff)`, since 2026-10-13: K_PUSH is 16): the
+dispatcher reads the kind from it
 without touching the request block and, for `K_FEXEC`, pulls the slot's
 register block (`SD_REGS_IN`, 2368 bytes) with the DMA engine into the
 slot's 64 KiB of the landing area before the hand-off. A u16 with kind 0
@@ -96,3 +97,10 @@ from its view of the program's memory into `SD_WB`; the reply's `wb_n`
 is 1 and `wb_ns` the copy's time. `K_FLUSH` (15): the session's end,
 the residency dropped ([`resident.md`](resident.md)); `exit_aux` = the
 pages this slot gave back.
+
+`fill_off`, `fill_len` (336, 344; `K_RESIDENT`: the range of the chunk to
+copy from the staging slot, 0 bytes = the page alone) and, for `K_PUSH`,
+`fn_id` = the program address, `entry` = the staging slot to copy into,
+`fill_len` = the bytes (within one chunk, 64-aligned, at most 2 MiB): the
+host reads them out of `RESIDENT + entry x 2 MiB`. The request is 352
+bytes. The SLOTSEQ word: `kind << 11 | seq & 0x7ff` (2026-10-13).

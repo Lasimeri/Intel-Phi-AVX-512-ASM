@@ -78,3 +78,7 @@ step of 0 is one slice with the file as it is (no split), run on this
 thread without waking the pool (5 ms when it has parked). With
 `-s 1000` the pool spins a second after a job, so a session's requests
 find it awake.
+
+A single slice (step 0) runs on pool thread 0, through `vpu_pool_map` with
+two slices of which the second is empty, never on the slot's control
+thread (2026-10-13: that thread's core is the control plane's).

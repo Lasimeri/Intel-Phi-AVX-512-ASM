@@ -78,3 +78,30 @@ was a DMA to physical address 0: the pages stayed zero and the program
 computed on zeros without a fault. `res_pull` now refuses an entry
 without a frame. With several slot processes each would need to see
 the flush (a generation in the table): not yet, one slot a card today.
+
+## Fill ranges, pushes by the engine, the address reservation (2026-10-13, later)
+
+- A `K_RESIDENT` names a range of its chunk to fill (`fill_off`, `fill_len`
+  at 336 and 344 of the request): `res_pull` copies only that range; a
+  length of 0 is the page alone (`res_mark`: a chunk the program only
+  writes), resident at once with no copy. The host keeps a 64 KiB
+  coverage bitmap per chunk and asks for the units a call reads.
+- `res_push` (the dispatcher's, `K_PUSH`): the bytes at a program address
+  (resident here, within one chunk, 64-aligned) copied by the engine from
+  the pool page's frame into a window staging slot (`cdma_submit_tohost`,
+  [`cdma.md`](cdma.md)); the slot waits for the copy's number. 64 MiB come
+  back in 18 to 20 ms (3.2 GB/s); the slot's own posted stores through the
+  aperture did 0.5 GB/s.
+- The worker reserves `[0x550000000000, 0x7ff000000000)` as one PROT_NONE
+  mapping before its first own mapping (`reserve_high`, from `_start`): a
+  position-independent program's heap and mmap region lie there, so a
+  resident page can take the program's address without meeting the
+  worker's windows, pools, arenas or thread stacks (a 1 MiB-element run
+  did, before: the slot's stack vanished under a page). `resv_free` says
+  whether an address may be taken (inside the reservation, or free by a
+  probe mapping); `resv_restore` puts the PROT_NONE page back when a page
+  returns to the pool (`res_flush`).
+- `res_map_all` places a run of consecutive pool pages at consecutive
+  program addresses with one `mremap`: every `mremap` or `munmap` of a
+  huge page in the slot process is a TLB shootdown over its ~110 running
+  threads' CPUs (about 100 us each on the card).

@@ -47,3 +47,15 @@ trip per piece, 64 KiB pieces today.
 
 `stat_resident`, `stat_resident_ns`, `stat_push_ns` for the exit report
 ([`main.md`](main.md)).
+
+## Units, rounds, staging slots (2026-10-13, later)
+
+Residency is by 64 KiB units: a chunk's entry keeps a coverage bitmap
+(`RE_FILLED`), `card_need` says which of a call's units the card lacks,
+`card_resident_post` stages their span (`copy_mapped`, through
+`/proc/self/mem`) into the next staging slot and posts `K_RESIDENT` with
+the fill range (0 bytes for a chunk only written: the page), and
+`card_resident_done` waits and enters the page and the units. Pushes:
+`card_push_post` asks the engine for a piece (within one chunk, at most
+2 MiB) into a staging slot, `card_push_done` copies it out. One request
+is in flight per card; [`sigill.md`](sigill.md) runs the rounds.

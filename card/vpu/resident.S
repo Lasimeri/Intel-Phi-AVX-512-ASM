@@ -194,9 +194,11 @@ res_pull:
 	pushq %r13
 	pushq %r14
 	movl %edi, %ebx
+	pushq %rcx				# len
 	movq %rsi, %r12
 	shlq $21, %r12
 	addq $OFF_RESIDENT, %r12		# the source offset
+	addq %rdx, %r12				# ... of the range
 	movq res_table(%rip), %rax
 	movq %rbx, %rcx
 	shlq $5, %rcx
@@ -204,12 +206,13 @@ res_pull:
 	testq %r13, %r13
 	jnz 0f
 	xorl %eax, %eax				# no frame: never a DMA to physical 0
+	addq $8, %rsp
 	jmp 9f
-0:
+0:	addq %rdx, %r13				# ... at the range
 	xorl %r14d, %r14d			# done
-1:	cmpq $HUGE_BYTES, %r14
+1:	cmpq (%rsp), %r14
 	jae 3f
-	movq $HUGE_BYTES, %rdx
+	movq (%rsp), %rdx
 	subq %r14, %rdx
 	cmpq $EP_PIECE, %rdx
 	jbe 2f
@@ -220,17 +223,30 @@ res_pull:
 	call cdma_submit_phys
 	popq %rdx
 	testq %rax, %rax
-	jz 9f
+	jz 8f
 	addq %rdx, %r14
 	jmp 1b
 3:	movq res_table(%rip), %rcx
 	movq %rbx, %rdx
 	shlq $5, %rdx
 	movq %rax, RT_SEQ(%rcx,%rdx)
+8:	addq $8, %rsp				# len
 9:	popq %r14
 	popq %r13
 	popq %r12
 	popq %rbx
+	ret
+
+# res_mark(edi index): the entry resident without a fill (a page the
+# program only writes: K_RESIDENT with a fill of 0 bytes). The
+# dispatcher's.
+	.globl res_mark
+res_mark:
+	movq res_table(%rip), %rcx
+	movl %edi, %edx
+	shlq $5, %rdx
+	movl $RS_RESIDENT, RT_STATE(%rcx,%rdx)
+	movq $0, RT_SEQ(%rcx,%rdx)
 	ret
 
 # res_wait(edi index): until the entry's fill has landed (the engine's
@@ -280,6 +296,7 @@ res_map_all:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
+	pushq %r14
 	xorl %ebx, %ebx				# index
 	xorl %r13d, %r13d			# moved
 1:	cmpq res_n(%rip), %rbx
@@ -293,26 +310,59 @@ res_map_all:
 	btq %rbx, (%rax)
 	jc 7f
 	movq RT_ADDR(%rcx,%rdx), %r12		# the program address
-	movq res_pool(%rip), %rdi
+	movq %r12, %rdi
+	call resv_free
+	testl %eax, %eax
+	jz 9f					# taken on this card: refused
+	# the run: pages rbx .. rbx + n - 1 resident, unplaced, at addresses
+	# r12 + k x 2 MiB (one mremap, one TLB shootdown for the run)
+	movl $1, %r14d
+2:	leaq 1(%rbx), %rax
+	addq %r14, %rax
+	decq %rax				# the next index
+	cmpq res_n(%rip), %rax
+	jae 3f
+	movq res_table(%rip), %rcx
+	movq %rax, %rdx
+	shlq $5, %rdx
+	cmpl $RS_RESIDENT, RT_STATE(%rcx,%rdx)
+	jne 3f
+	leaq res_mapped(%rip), %rsi
+	btq %rax, (%rsi)
+	jc 3f
+	movq %r14, %rsi
+	shlq $21, %rsi
+	addq %r12, %rsi
+	cmpq RT_ADDR(%rcx,%rdx), %rsi
+	jne 3f
+	incl %r14d
+	jmp 2b
+3:	movq res_pool(%rip), %rdi
 	movq %rbx, %rax
 	shlq $21, %rax
 	addq %rax, %rdi
-	movl $HUGE_BYTES, %esi
-	movl $HUGE_BYTES, %edx
+	movq %r14, %rsi
+	shlq $21, %rsi
+	movq %rsi, %rdx
 	movl $MREMAP_MAYMOVE | MREMAP_FIXED, %r10d
 	movq %r12, %r8
 	SYS SYS_mremap
 	cmpq %r12, %rax
 	jne 9f
-	leaq res_mapped(%rip), %rax
+4:	leaq res_mapped(%rip), %rax
 	btsq %rbx, (%rax)
 	incl %r13d
+	incq %rbx
+	decl %r14d
+	jnz 4b
+	jmp 1b
 7:	incq %rbx
 	jmp 1b
 8:	movl %r13d, %eax
 	jmp 10f
 9:	movl $-1, %eax
-10:	popq %r13
+10:	popq %r14
+	popq %r13
 	popq %r12
 	popq %rbx
 	ret
@@ -346,6 +396,11 @@ res_flush:
 	shlq $21, %rax
 	addq %rax, %r8				# back to its pool address
 	SYS SYS_mremap
+	movq res_table(%rip), %rcx
+	movq %rbx, %rdx
+	shlq $5, %rdx
+	movq RT_ADDR(%rcx,%rdx), %rdi
+	call resv_restore
 	leaq res_mapped(%rip), %rax
 	btrq %rbx, (%rax)
 	incl %r13d
@@ -369,3 +424,166 @@ res_flush:
 	popq %r12
 	popq %rbx
 	ret
+
+# The program's address space: the worker reserves [RESV_LO, RESV_HI)
+# (where a host program's mmap region lies, below its stack) as PROT_NONE
+# pieces before its first own mapping, so that its windows, pools, arenas
+# and every thread's stack land below it and a resident page can take a
+# program address there (res_map_all moves the page over the
+# reservation). A piece the kernel already holds (this process's own
+# stack, the vdso) stays unreserved and its bit clear; a program address
+# there, or anywhere else not free, is refused. See resident.md.
+	.set RESV_LO, 0x550000000000		# a position-independent program's heap lies from 0x55..
+	.set RESV_HI, 0x7ff000000000		# ... to its mmap region below the stack
+	.set RESV_PIECE, 0x40000000		# 1 GiB
+	.set RESV_PIECES, (RESV_HI - RESV_LO) / RESV_PIECE
+
+	.bss
+	.balign 64
+resv_bits:	.skip RESV_PIECES / 8
+	.text
+
+# reserve_high: the reservation, once, before the worker's first mmap:
+# one mapping over the whole range (nothing of the worker's lies there at
+# its start: a fixed binary at 0x400000, its heap just above); every
+# piece's bit set when it took, none when it did not. eax the pieces.
+	.globl reserve_high
+reserve_high:
+	movabsq $RESV_LO, %rdi
+	movabsq $RESV_HI - RESV_LO, %rsi
+	movl $PROT_NONE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 9f
+	leaq resv_bits(%rip), %rdi
+	movl $RESV_PIECES / 8 / 8, %ecx
+	movq $-1, %rax
+	rep stosq
+	movl $RESV_PIECES, %eax
+	ret
+9:	xorl %eax, %eax
+	ret
+
+# resv_free(rdi address, 2 MiB aligned): eax 1 when a resident page may
+# take the address: inside the reservation's pieces, or free (a probe
+# mapping that is unmapped again). 0 otherwise.
+	.globl resv_free
+resv_free:
+	pushq %rbx
+	movq %rdi, %rbx
+	movabsq $RESV_LO, %rax
+	cmpq %rax, %rbx
+	jb 1f
+	movabsq $RESV_HI, %rax
+	cmpq %rax, %rbx
+	jae 1f
+	movq %rbx, %rcx
+	movabsq $RESV_LO, %rax
+	subq %rax, %rcx
+	shrq $30, %rcx
+	leaq resv_bits(%rip), %rax
+	btq %rcx, (%rax)
+	jnc 1f
+	movl $1, %eax
+	popq %rbx
+	ret
+1:	movq %rbx, %rdi
+	movl $HUGE_BYTES, %esi
+	movl $PROT_NONE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 2f
+	movq %rbx, %rdi
+	movl $HUGE_BYTES, %esi
+	SYS SYS_munmap
+	movl $1, %eax
+	popq %rbx
+	ret
+2:	xorl %eax, %eax
+	popq %rbx
+	ret
+
+# resv_restore(rdi address, 2 MiB aligned): the hole a page left when it
+# went back to the pool, reserved again when it lies in the reservation.
+	.globl resv_restore
+resv_restore:
+	movabsq $RESV_LO, %rax
+	cmpq %rax, %rdi
+	jb 9f
+	movabsq $RESV_HI, %rax
+	cmpq %rax, %rdi
+	jae 9f
+	movl $HUGE_BYTES, %esi
+	movl $PROT_NONE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+9:	ret
+
+# res_push(rdi program address, esi staging index, rdx bytes): the bytes
+# of the program's memory at the address (resident on this card: within
+# one chunk, 64-aligned) copied by the DMA engine from the pool page's
+# frame into the window's staging slot, in pieces of one descriptor; rax
+# the last piece's sequence number, or 0 when the chunk is not resident
+# or a submit was refused. The dispatcher's (K_PUSH).
+	.globl res_push
+res_push:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movq %rdi, %rbx
+	andq $-HUGE_BYTES, %rbx			# the chunk
+	movq %rsi, %r12
+	shlq $21, %r12
+	addq $OFF_RESIDENT, %r12		# the destination offset
+	movq %rdx, %r14				# bytes
+	# the entry with the chunk's address, resident
+	movq res_table(%rip), %rcx
+	xorl %edx, %edx
+1:	cmpq res_n(%rip), %rdx
+	jae 8f
+	movq %rdx, %rax
+	shlq $5, %rax
+	cmpq RT_ADDR(%rcx,%rax), %rbx
+	jne 2f
+	cmpl $RS_RESIDENT, RT_STATE(%rcx,%rax)
+	je 3f
+2:	incq %rdx
+	jmp 1b
+3:	movq RT_PHYS(%rcx,%rax), %r13
+	testq %r13, %r13
+	jz 8f
+	subq %rbx, %rdi
+	addq %rdi, %r13				# the frame, at the address's offset
+	xorl %ebx, %ebx				# done
+4:	cmpq %r14, %rbx
+	jae 7f
+	movq %r14, %rdx
+	subq %rbx, %rdx
+	cmpq $EP_PIECE, %rdx
+	jbe 5f
+	movq $EP_PIECE, %rdx
+5:	leaq (%r12,%rbx), %rdi
+	leaq (%r13,%rbx), %rsi
+	pushq %rdx
+	call cdma_submit_tohost
+	popq %rdx
+	testq %rax, %rax
+	jz 8f
+	addq %rdx, %rbx
+	jmp 4b
+7:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+8:	xorl %eax, %eax
+	jmp 7b

@@ -109,3 +109,25 @@
 	.set SD_ADDR, 112			# resolved: the function's address, 0 until then
 	.set SD_LEN, 120
 	.set SD_BYTES, 128
+# Residency by 64 KiB units: a chunk's entry keeps which units the card
+# holds (RE_FILLED, 32 bits); a need is a chunk and the units a stripe
+# reads (0 for a chunk it only writes: the page without a fill).
+	.set RE_FILLED, 28
+	.set UNIT, 65536
+	.set NEED_MAX, 1024			# needs queued per card per call (a 64 MiB array is 32 chunks)
+	.set NQ_CHUNK, 0
+	.set NQ_UNITS, 8
+	.set NQ_CLASS, 12
+	.set NQ_BYTES, 16
+	.set PUSH_MAX, 8			# written ranges queued per card per call
+	.set PQ_ADDR, 0
+	.set PQ_LEN, 8
+	.set PQ_DONE, 16
+	.set PQ_BYTES, 24
+# The card record's pending request (one in flight per card).
+	.set CD_PEND_CHUNK, 88
+	.set CD_PEND_UNITS, 96			# a push: the staging slot
+	.set CD_PEND_CLASS, 100
+	.set CD_PEND_ADDR, 104
+	.set CD_PEND_LEN, 112
+	.set CD_POSTED, 120

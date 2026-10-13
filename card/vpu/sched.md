@@ -66,7 +66,7 @@ host's residency budget at stage 2).
 ## K_RESIDENT, the pool and the write-back (2026-10-13, later)
 
 The dispatcher reads a `K_RESIDENT`'s request line (the kind rides in
-the u16's top four bits), assigns a pool page and submits the DMA fill
+the u16's top five bits), assigns a pool page and submits the DMA fill
 straight into its frame ([`resident.md`](resident.md)); the page index
 and the copy's sequence number ride in the job line (`SH_RES_IDX`,
 `SH_PULL_SEQ`) and the slot waits for the copy (`res_wait`) and
@@ -96,3 +96,21 @@ median at most 8 us, p99 at most 20 us. The numbers measured are in
 - A slot process's main thread sits on hardware thread 3 of its first
   core; with `-T 2` the pool's second thread on that core shares it.
 - Kinds other than `K_PING` are refused until `fexec.S` lands.
+
+## The control thread's CPU, the whole request, K_PUSH by the engine (2026-10-13, later)
+
+A slot's main thread never shares a CPU with a spinning thread: with one
+slot leaving cores free it takes the first free core's hardware thread 0
+(`-S 1 -C 55`: CPU 221; the pollers of the block devices live on core
+55's threads 1 and 2 only), else core 56's thread 1 when the slot leaves
+only core 56, else its first core's thread 1. Two spinners on one CPU are
+time-sliced by the card's kernel at milliseconds: a 114-slice dispatch
+cost 3.5 ms flat before (the main thread sat on pool thread 57's CPU);
+and a control thread beside the dispatcher's PCIe polling (core 56) ran
+everything 5 to 12x slower. The dispatcher and the slot both copy the
+whole request block (six lines, `SL_REQ_BYTES`), since the split and the
+fill fields sit in its fifth and sixth lines; the SLOTSEQ word is
+`kind << 11 | seq & 0x7ff` (K_PUSH is 16). `K_PUSH` is served by the
+dispatcher's engine (`res_push`) with the slot waiting for the copy
+(`land_wait`); the slot's reply carries the copy's number in `exit_aux`
+and the wait's result in `exit_rip` when it refuses.

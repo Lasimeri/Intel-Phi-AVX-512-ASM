@@ -13,3 +13,7 @@ The card-side layout (`REGS_*`, `SL_*`, `SR_*`, `SD_*`, `OFF_*`, the
 kinds) comes from [`../../../card/vpu/proto.inc`](../../../card/vpu/proto.md),
 included beside this file, and is checked against `vpu_fexec.h` by
 `tools/vpu-layout-check.c`.
+
+2026-10-13, later: `RE_FILLED` (the 64 KiB coverage bitmap), `UNIT`,
+`NEED_MAX` 1024 and the need entry (`NQ_*`), `PUSH_MAX` and the push
+entry (`PQ_*`), the card's pending request (`CD_PEND_*`, `CD_POSTED`).

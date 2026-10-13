@@ -779,3 +779,88 @@ cdma_submit_phys:
 	ret
 90:	xorl %eax, %eax
 	ret
+
+# The same descriptors the other way round: a card-to-host copy (K_PUSH
+# by the engine: the program's resident bytes into a window staging
+# slot). Linux's mic_x100_dma.c: qw0 = source | length, qw1 = type |
+# destination, either direction, physical addresses.
+# cdma_submit_tohost(rdi = window offset, the destination, rsi = source, a card physical
+# address, rdx = bytes) -> rax = the copy's sequence number, or 0 when
+# refused, as cdma_submit; the destination must be a multiple of 64 under
+# 2^40 (a pooled huge page's frame, resident.S) instead of a landing
+# offset. Clobbers rcx, rdx, rsi, rdi, r8 to r11.
+	.globl cdma_submit_tohost
+cdma_submit_tohost:
+	cmpq $0, cdma_ready(%rip)
+	je 90f
+	movq %rdi, %rax
+	orq %rsi, %rax
+	orq %rdx, %rax
+	testq $63, %rax
+	jnz 90f
+	testq %rdx, %rdx
+	jz 90f
+	cmpq $CD_LEN_MAX, %rdx
+	ja 90f
+	movq cdma_win_bytes(%rip), %rax
+	cmpq %rax, %rdi
+	jae 90f
+	subq %rdi, %rax
+	cmpq %rax, %rdx
+	ja 90f
+	movabsq $1 << 40, %rax
+	cmpq %rax, %rsi
+	jae 90f
+	movq %rdx, %r10			# bytes
+1:	movq cdma_seq(%rip), %rax
+	subq cdma_done(%rip), %rax
+	cmpq $CD_IN_FLIGHT, %rax
+	jb 2f
+	pushq %rdi
+	pushq %rsi
+	pushq %r10
+	call cdma_poll
+	popq %r10
+	popq %rsi
+	popq %rdi
+	testq %rax, %rax
+	js 90f
+	jmp 1b
+2:	movq cdma_seq(%rip), %r11
+	incq %r11			# seq
+	movq cdma_head(%rip), %r8
+	shlq $4, %r8
+	addq cdma_page(%rip), %r8
+	movq %rsi, %rax				# the card source
+	movq %r10, %rcx
+	shrq $6, %rcx
+	shlq $46, %rcx
+	orq %rcx, %rax
+	movq %rax, 0(%r8)
+	movq cdma_win_phys(%rip), %rax
+	addq %rdi, %rax				# the window destination
+	movabsq $1 << 60, %rcx
+	orq %rcx, %rax
+	movq %rax, 8(%r8)
+	movq %r11, 16(%r8)
+	movq cdma_page_phys(%rip), %rax
+	addq $CD_STATUS, %rax
+	movabsq $2 << 60, %rcx
+	orq %rcx, %rax
+	movq %rax, 24(%r8)
+	movq $0, 32(%r8)
+	movq $0, 40(%r8)
+	movq $0, 48(%r8)
+	movq $0, 56(%r8)
+	FENCE
+	movq %r11, cdma_seq(%rip)
+	movq cdma_head(%rip), %rax
+	addq $4, %rax
+	andq $RING_N - 1, %rax
+	movq %rax, cdma_head(%rip)
+	movq cdma_regs(%rip), %rcx
+	movl %eax, R_DHPR(%rcx)
+	movq %r11, %rax
+	ret
+90:	xorl %eax, %eax
+	ret

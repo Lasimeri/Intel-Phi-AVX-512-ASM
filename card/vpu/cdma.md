@@ -128,3 +128,13 @@ sense; and if the owner dies with a copy in flight, the engine finishes
 that copy (microseconds) into a page the kernel may already have freed.
 A small kernel device (a pinned buffer, the channel quiesced in its
 release handler) would close both.
+
+## cdma_submit_tohost (2026-10-13)
+
+The same descriptors the other way round: `rdi` the window offset (the
+destination), `rsi` a card physical address (the source), `rdx` bytes; the
+memcpy descriptor's first quadword is the source with the length, the
+second the destination with the type (Linux `drivers/dma/mic_x100_dma.c`,
+`mic_dma_memcpy_desc`; the engine moves either direction on physical
+addresses, System Software Developer's Guide 2.1.8.2.1). Used by
+`res_push` for `K_PUSH`.

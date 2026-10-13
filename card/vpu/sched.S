@@ -15,7 +15,7 @@
 	.bss
 	.balign 64
 slotseq_now:	.skip 64		# the SLOTSEQ line as just read
-slreq:	.skip 64			# a posted slot's first request line
+slreq:	.skip 384			# a posted slot's request block (SL_REQ_BYTES, whole lines)
 reply_buf:	.skip 128		# the reply built here, stored in two lines
 slreq_wb:	.skip 64			# the request's line holding the write-back count
 wb_tab:	.skip 512 * 16			# the write-back ranges, read from SD_WB_TAB
@@ -203,11 +203,11 @@ slots_poll:
 	movq %r12, %rax
 	imulq $SH_SLOT_BYTES, %rax, %rax
 	leaq SH_SLOT0(%r13,%rax), %r13		# the slot's block
-	# K_FEXEC (the kind rides in the u16's top four bits): the register
+	# K_FEXEC (the kind rides in the u16's top five bits): the register
 	# block pulled by the DMA engine into this slot's part of the landing
 	# area first; the copy's sequence number goes with the job
 	movq %rcx, %rax
-	shrl $12, %eax
+	shrl $11, %eax
 	movq $0, SH_PULL_SEQ(%r13)
 	cmpl $K_RESIDENT, %eax
 	jne 5f
@@ -219,7 +219,7 @@ slots_poll:
 	addq window(%rip), %rsi
 	addq $OFF_SLOTS, %rsi
 	leaq slreq(%rip), %rdi
-	movl $1, %edx
+	movl $SL_REQ_BYTES / 64 + 1, %edx	# the fill range sits in the sixth line
 	call phi_copy64
 	movq slreq + SL_FN_ID(%rip), %rdi
 	movl slreq + SL_THREADS(%rip), %esi
@@ -227,13 +227,41 @@ slots_poll:
 	movl %eax, SH_RES_IDX(%r13)
 	cmpl $-1, %eax
 	je 51f
-	movl %eax, %edi
+	movq slreq + SL_FILL_LEN(%rip), %rcx
+	testq %rcx, %rcx
+	jnz 52f
+	movl %eax, %edi				# nothing to fill: the page as it is
+	call res_mark
+	movq $-1, SH_PULL_SEQ(%r13)
+	jmp 51f
+52:	movl %eax, %edi
 	movq slreq + SL_ENTRY(%rip), %rsi
+	movq slreq + SL_FILL_OFF(%rip), %rdx
 	call res_pull
 	movq %rax, SH_PULL_SEQ(%r13)
 51:	popq %rcx
 	jmp 6f
-5:	cmpl $K_FEXEC, %eax
+5:	cmpl $K_PUSH, %eax
+	jne 55f
+	# K_PUSH: the request line (program address, staging index, bytes),
+	# the bytes copied by the engine from the pool page's frame into the
+	# staging slot; the slot waits for the copy
+	pushq %rcx
+	movq %r12, %rsi
+	shlq $12, %rsi
+	addq window(%rip), %rsi
+	addq $OFF_SLOTS, %rsi
+	leaq slreq(%rip), %rdi
+	movl $SL_REQ_BYTES / 64 + 1, %edx
+	call phi_copy64
+	movq slreq + SL_FN_ID(%rip), %rdi
+	movq slreq + SL_ENTRY(%rip), %rsi
+	movq slreq + SL_FILL_LEN(%rip), %rdx
+	call res_push
+	movq %rax, SH_PULL_SEQ(%r13)
+	popq %rcx
+	jmp 6f
+55:	cmpl $K_FEXEC, %eax
 	jne 6f
 	pushq %rcx
 	movq %r12, %rdi
@@ -398,10 +426,33 @@ sched_main:
 	movl core_base(%rip), %eax
 	movq %rax, TLS_CORE(%rdi)
 	movq $3, TLS_MATE(%rdi)
+	# this thread's CPU: never one of its pool's (a spinning thread beside
+	# a spinning thread is time-sliced by the kernel, milliseconds a
+	# dispatch, measured 2026-10-13): core 56's hardware thread 1 (CPU 226)
+	# when the slots leave core 56 to the control plane and this is the
+	# only slot, else the first core's hardware thread 1 (the pool takes 0
+	# and 3; the block-device pollers live on core 55 only)
 	movl core_base(%rip), %edi
+	addl core_count(%rip), %edi		# the first core after the pool
+	cmpl $NCORES - 2, %edi
+	ja 1f
+	cmpl $1, nslots(%rip)
+	jne 1f
+	shll $2, %edi				# its hardware thread 0: a core of its
+	addl $1, %edi				# own (core 56 is the dispatcher's, whose
+	jmp 2f					# PCIe polling slows a neighbour 5 to 12x)
+1:	movl core_base(%rip), %edi
+	addl core_count(%rip), %edi
+	cmpl $NCORES - 1, %edi
+	ja 11f
+	cmpl $1, nslots(%rip)
+	jne 11f
+	movl $226, %edi
+	jmp 2f
+11:	movl core_base(%rip), %edi
 	shll $2, %edi
-	addl $4, %edi
-	call pin_cpu
+	addl $2, %edi
+2:	call pin_cpu
 	movl slot_cores(%rip), %edi
 	imull slot_tpc(%rip), %edi
 	call pool_start
@@ -442,11 +493,11 @@ sched_main:
 	call sched_wait			# the job word moved
 	call now_ns
 	movq %rax, sched_t0(%rip)
-	# the request's first line, read here on this core: seq, kind, flags,
-	# fn_id, entry, threads, nstripes
+	# the request block, read here on this core (the split and the
+	# write-back table's counts sit in its fifth and sixth lines)
 	leaq slreq(%rip), %rdi
 	movq %r14, %rsi
-	movl $1, %edx
+	movl $SL_REQ_BYTES / 64 + 1, %edx
 	call phi_copy64
 	movq slreq + SL_SEQ(%rip), %r15
 	movl slreq + SL_KIND(%rip), %eax
@@ -474,35 +525,25 @@ sched_main:
 16:	call res_flush				# K_FLUSH: the session's residency dropped
 	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
 	jmp 1f
-15:	# K_PUSH: entry bytes of the program's memory at fn_id, in lines,
-	# into this slot's SD_WB (the pages must be resident here)
-	call res_map_all
-	movq slreq + SL_ENTRY(%rip), %rdx
-	testq %rdx, %rdx
+15:	# K_PUSH: the dispatcher submitted the engine's copy of the bytes at
+	# fn_id (resident here) into the staging slot; waited for here
+	movq SH_PULL_SEQ(%r13), %rdi
+	movq %rdi, reply_buf + SR_EXIT_AUX(%rip)	# the copy's number (0: refused), for a refusal's line
+	testq %rdi, %rdi
 	jz 151f
-	cmpq $SD_WB_BYTES, %rdx
-	ja 151f
-	testq $63, %rdx
-	jnz 151f
-	movq slreq + SL_FN_ID(%rip), %rsi
-	testq $63, %rsi
-	jnz 151f
-	call now_ns				# clobbers rcx, rdx, rsi, rdi, r11: before the operands
+	call now_ns
 	movq %rax, sched_t0 + 8(%rip)
-	movq slreq + SL_ENTRY(%rip), %rdx
-	shrq $6, %rdx
-	movq slreq + SL_FN_ID(%rip), %rsi
-	movq %r12, %rdi
-	shlq $20, %rdi
-	addq $OFF_SLOTDATA + SD_WB, %rdi
-	addq window(%rip), %rdi
-	call phi_copy64
+	movq SH_PULL_SEQ(%r13), %rdi
+	call land_wait
+	movq %rax, reply_buf + SR_EXIT_RIP(%rip)	# 1 landed, 0 timed out
+	testl %eax, %eax
+	jz 151f
 	call now_ns
 	subq sched_t0 + 8(%rip), %rax
 	movq %rax, reply_buf + SR_WB_NS(%rip)
 	movl $1, reply_buf + SR_WB_N(%rip)
 	jmp 1f
-151:	movl $E_REQUEST, reply_buf + SR_STATUS(%rip)
+151:	movl $E_PULL, reply_buf + SR_STATUS(%rip)
 	jmp 1f
 14:	# K_RESIDENT: the page the dispatcher assigned, its fill waited for
 	movl SH_RES_IDX(%r13), %edi
@@ -514,7 +555,9 @@ sched_main:
 	jne 142f
 	movl $E_PULL, reply_buf + SR_STATUS(%rip)
 	jmp 1f
-142:	call res_wait
+142:	cmpq $-1, SH_PULL_SEQ(%r13)
+	je 143f					# no fill: resident already
+	call res_wait
 	testl %eax, %eax
 	jnz 143f
 	movl $E_PULL, reply_buf + SR_STATUS(%rip)

@@ -1,11 +1,14 @@
-# sigill.S: the SIGILL handler: the faulting instruction is the first
-# AVX-512 instruction of a function the library has a seed for (seeds.S),
-# so the whole function from there is one instance on the cards: the
-# register file built from the signal frame, the operands' chunks made
-# resident on each card that runs a stripe, the stripes posted to the
-# cards at once and waited for, the written ranges fetched back, and the
-# frame set as the function's `ret` would have left it: rip the return
-# address, rsp past it, rax and xmm0 the function's. See sigill.md.
+# sigill.S: the SIGILL handler: the faulting instruction is inside a
+# function the library has a seed for (seeds.S), so the whole function
+# from there is one call on the cards: the register file built from the
+# signal frame, the loop split into a stripe per card, the units of the
+# program's memory each stripe reads made resident on its card (and a
+# page for what it writes), the instances posted to the cards at once
+# and waited for, the written ranges fetched back, and the frame set as
+# the function's `ret` would have left it: rip the return address, rsp
+# past it, rax and xmm0 the function's. Residency and pushes go in
+# rounds, one request in flight per card, so the four cards move
+# together. See sigill.md.
 
 	.include "common.inc"
 	.include "proto.inc"
@@ -16,6 +19,11 @@
 file_in:	.skip 4096			# the register file sent (REGS_BYTES)
 stripe_lo:	.skip MAX_CARDS * 8
 stripe_hi:	.skip MAX_CARDS * 8
+need_q:	.skip MAX_CARDS * NEED_MAX * NQ_BYTES
+need_n:	.skip MAX_CARDS * 8
+need_i:	.skip MAX_CARDS * 8
+push_q:	.skip MAX_CARDS * PUSH_MAX * PQ_BYTES
+push_n:	.skip MAX_CARDS * 8
 	.globl ymm_off, stat_calls, stat_call_ns, verbose
 ymm_off:	.skip 8				# where YMM_Hi128 lies in the XSAVE area (CPUID 0xD/2 EBX)
 stat_calls:	.skip 8
@@ -24,7 +32,7 @@ verbose:	.skip 8
 
 	.section .rodata
 s_unknown1:	.asciz "phi512: SIGILL at "
-s_unknown2:	.asciz " is not at a seed's entry: no blob for it (the program dies as it would have)"
+s_unknown2:	.asciz " is not inside a seeded function: no blob for it (the program dies as it would have)"
 s_fail1:	.asciz "phi512: card "
 s_fail2:	.asciz " refused an instance of "
 s_fail3:	.asciz ": status "
@@ -41,8 +49,13 @@ s_led2:	.asciz ": "
 s_led3:	.asciz " elements in "
 s_led4:	.asciz " stripe(s) on "
 s_led5:	.asciz " card(s), "
-s_led6:	.asciz " chunk(s) made resident, "
-s_led7:	.asciz " us"
+s_led6:	.asciz " fill(s), "
+s_led7:	.asciz " KiB, "
+s_led8:	.asciz " us"
+s_led9:	.asciz " (resident "
+s_led10:	.asciz ", run "
+s_led11:	.asciz ", push "
+s_led12:	.asciz " us; a card's run at most "
 
 	.text
 
@@ -51,7 +64,8 @@ phi512_sig_restorer:
 	movl $SYS_rt_sigreturn, %eax
 	syscall
 
-# phi512_sigill(sig edi, info rsi, uc rdx)
+# phi512_sigill(sig edi, info rsi, uc rdx). Frame: 0 t0, 8 elements,
+# 16 fills before, 24 the failed step's code, 32 the failed card.
 	.globl phi512_sigill
 phi512_sigill:
 	pushq %rbx
@@ -60,21 +74,20 @@ phi512_sigill:
 	pushq %r13
 	pushq %r14
 	pushq %r15
-	subq $64, %rsp
+	subq $80, %rsp
 	movq %rdx, %rbx				# uc
 	call now_ns
-	movq %rax, 56(%rsp)			# t0
+	movq %rax, 0(%rsp)
 	movq UC_GREGS + 8 * G_RIP(%rbx), %r12	# rip
 	call seed_of				# r12 -> the seed in rax, or 0
 	testq %rax, %rax
 	jz .Lunknown
 	movq %rax, %r13				# the seed
-	# the register file from the frame
 	leaq file_in(%rip), %rdi
 	movq %rbx, %rsi
 	call file_from_frame
 	# the stripes: one per card when the seed splits, else one
-	movq ncards(%rip), %r14			# stripes
+	movq ncards(%rip), %r14
 	cmpl $0, SD_STEP(%r13)
 	jne 1f
 	movl $1, %r14d
@@ -84,9 +97,8 @@ phi512_sigill:
 	movl SD_BOUND(%r13), %eax
 	movq REGS_GPR(%rdx,%rax,8), %r9		# the bound
 	movq %r9, %rax
-	subq %r8, %rax				# the elements
-	movq %rax, 48(%rsp)
-	# per = ceil(elements / stripes / step) * step
+	subq %r8, %rax
+	movq %rax, 8(%rsp)			# the elements
 	xorl %edx, %edx
 	divq %r14
 	movl SD_STEP(%r13), %ecx
@@ -97,8 +109,8 @@ phi512_sigill:
 	decq %rax
 	xorl %edx, %edx
 	divq %rcx
-	imulq %rcx, %rax			# per
-	xorl %r15d, %r15d			# s
+	imulq %rcx, %rax			# per stripe
+	xorl %r15d, %r15d
 3:	cmpq %r14, %r15
 	jae 4f
 	leaq stripe_lo(%rip), %rcx
@@ -112,24 +124,49 @@ phi512_sigill:
 	movq %rdx, %r8
 	incq %r15
 	jmp 3b
-4:	# residency, then the post, stripe by stripe (a stripe with no
-	# elements is skipped)
+4:	# residency: every stripe's needs queued on its card, then rounds
 	movq stat_resident(%rip), %rax
-	movq %rax, 40(%rsp)
+	movq %rax, 16(%rsp)
+	leaq need_n(%rip), %rdi
+	movl $MAX_CARDS * 2, %ecx
+	xorl %eax, %eax
+	rep stosq				# need_n and need_i
+	leaq push_n(%rip), %rdi
+	movl $MAX_CARDS, %ecx
+	rep stosq
+	movq $0, need_overflow(%rip)
+	movq $0, 64(%rsp)			# the cards' longest run
 	xorl %r15d, %r15d
 5:	cmpq %r14, %r15
 	jae 6f
-	leaq stripe_lo(%rip), %rcx
-	movq (%rcx,%r15,8), %rdi
-	leaq stripe_hi(%rip), %rcx
-	cmpq (%rcx,%r15,8), %rdi
-	jae 51f
+	call stripe_empty
+	jnz 51f
 	movq %r15, %rdi
 	movq %r13, %rsi
-	call stripe_resident
-	movl %eax, 32(%rsp)
+	call stripe_needs
+	movq %r15, %rdi
+	movq %r13, %rsi
+	call stripe_pushes
+51:	incq %r15
+	jmp 5b
+6:	call now_ns
+	movq %rax, 40(%rsp)			# t: needs queued
+	movl $2, 24(%rsp)
+	movq $0, failed_card(%rip)
+	cmpq $0, need_overflow(%rip)
+	jne .Lfailed_card			# step rc 2: more chunks than a call may need
+	call resident_rounds
+	movl %eax, 24(%rsp)
 	testl %eax, %eax
-	jnz .Lfailed
+	jnz .Lfailed_card
+	call now_ns
+	movq %rax, 48(%rsp)			# t: resident
+	# the instances, posted on every card, then waited for
+	xorl %r15d, %r15d
+7:	cmpq %r14, %r15
+	jae 8f
+	call stripe_empty
+	jnz 71f
 	movq %r15, %rdi
 	imulq $CD_BYTES, %rdi, %rdi
 	leaq cards(%rip), %rax
@@ -141,52 +178,42 @@ phi512_sigill:
 	leaq stripe_hi(%rip), %r8
 	movq (%r8,%r15,8), %r8
 	call card_fexec_post
-51:	incq %r15
-	jmp 5b
-6:	# every instance waited for, its exit checked
-	xorl %r15d, %r15d
-7:	cmpq %r14, %r15
-	jae 8f
-	leaq stripe_lo(%rip), %rcx
-	movq (%rcx,%r15,8), %rdi
-	leaq stripe_hi(%rip), %rcx
-	cmpq (%rcx,%r15,8), %rdi
-	jae 71f
+71:	incq %r15
+	jmp 7b
+8:	xorl %r15d, %r15d
+9:	cmpq %r14, %r15
+	jae 10f
+	call stripe_empty
+	jnz 91f
 	movq %r15, %rdi
 	imulq $CD_BYTES, %rdi, %rdi
 	leaq cards(%rip), %rax
 	addq %rax, %rdi
 	movq %rdi, %rbp
 	call card_wait
-	movl %eax, 32(%rsp)
+	movl %eax, 24(%rsp)
+	movq %r15, 32(%rsp)
 	testl %eax, %eax
 	jnz .Lfailed
 	movq CD_SLOTP(%rbp), %rcx
-	movl SLOT_REPLY + SR_EXIT_KIND(%rcx), %eax
+	movq SLOT_REPLY + SR_RUN_NS(%rcx), %rax
+	cmpq 64(%rsp), %rax
+	jbe 92f
+	movq %rax, 64(%rsp)
+92:	movl SLOT_REPLY + SR_EXIT_KIND(%rcx), %eax
 	addl $1000, %eax			# the exit kind as seen here, in the failure line
-	movl %eax, 32(%rsp)
+	movl %eax, 24(%rsp)
 	cmpl $X_RET, SLOT_REPLY + SR_EXIT_KIND(%rcx)
 	jne .Lfailed
-71:	incq %r15
-	jmp 7b
-8:	# the written ranges back, stripe by stripe
-	xorl %r15d, %r15d
-9:	cmpq %r14, %r15
-	jae 10f
-	leaq stripe_lo(%rip), %rcx
-	movq (%rcx,%r15,8), %rdi
-	leaq stripe_hi(%rip), %rcx
-	cmpq (%rcx,%r15,8), %rdi
-	jae 91f
-	movq %r15, %rdi
-	movq %r13, %rsi
-	call stripe_push
-	movl %eax, 32(%rsp)
-	testl %eax, %eax
-	jnz .Lfailed
 91:	incq %r15
 	jmp 9b
-10:	# the frame as the function's ret leaves it: the first stripe's file
+10:	call now_ns
+	movq %rax, 56(%rsp)			# t: ran
+	call push_rounds
+	movl %eax, 24(%rsp)
+	testl %eax, %eax
+	jnz .Lfailed_card
+	# the frame as the function's ret leaves it: the first stripe's file
 	# gives rax and xmm0; the upper halves of every ymm are zero (the
 	# function's vzeroupper); rip the return address, rsp past it
 	leaq cards(%rip), %rbp
@@ -218,7 +245,7 @@ phi512_sigill:
 	movq %rax, UC_GREGS + 8 * G_RSP(%rbx)
 	incq stat_calls(%rip)
 	call now_ns
-	subq 56(%rsp), %rax
+	subq 0(%rsp), %rax
 	addq %rax, stat_call_ns(%rip)
 	cmpq $0, verbose(%rip)
 	je .Lout
@@ -230,7 +257,7 @@ phi512_sigill:
 	call w_str
 	leaq s_led2(%rip), %rsi
 	call w_str
-	movq 48(%rsp), %rdi
+	movq 8(%rsp), %rdi
 	call w_dec
 	leaq s_led3(%rip), %rsi
 	call w_str
@@ -243,9 +270,14 @@ phi512_sigill:
 	leaq s_led5(%rip), %rsi
 	call w_str
 	movq stat_resident(%rip), %rdi
-	subq 40(%rsp), %rdi
+	subq 16(%rsp), %rdi
 	call w_dec
 	leaq s_led6(%rip), %rsi
+	call w_str
+	movq stat_resident_bytes(%rip), %rdi
+	shrq $10, %rdi
+	call w_dec
+	leaq s_led7(%rip), %rsi
 	call w_str
 	movq %r12, %rax
 	xorl %edx, %edx
@@ -253,11 +285,33 @@ phi512_sigill:
 	divq %rcx
 	movq %rax, %rdi
 	call w_dec
-	leaq s_led7(%rip), %rsi
+	leaq s_led8(%rip), %rsi
+	call w_str
+	leaq s_led9(%rip), %rsi
+	call w_str
+	movq 48(%rsp), %rdi
+	subq 40(%rsp), %rdi
+	call w_us
+	leaq s_led10(%rip), %rsi
+	call w_str
+	movq 56(%rsp), %rdi
+	subq 48(%rsp), %rdi
+	call w_us
+	leaq s_led11(%rip), %rsi
+	call w_str
+	call now_ns
+	movq %rax, %rdi
+	subq 56(%rsp), %rdi
+	call w_us
+	leaq s_led12(%rip), %rsi
+	call w_str
+	movq 64(%rsp), %rdi
+	call w_us
+	leaq s_led8(%rip), %rsi
 	call w_str
 	movl $2, %edi
 	call l_end
-.Lout:	addq $64, %rsp
+.Lout:	addq $80, %rsp
 	popq %r15
 	popq %r14
 	popq %r13
@@ -276,11 +330,14 @@ phi512_sigill:
 	movl $2, %edi
 	call l_end
 	jmp .Ldie
+.Lfailed_card:
+	movq failed_card(%rip), %rax
+	movq %rax, 32(%rsp)
 .Lfailed:
 	call l_begin
 	leaq s_fail1(%rip), %rsi
 	call w_str
-	movq %r15, %rdi
+	movq 32(%rsp), %rdi
 	call w_dec
 	leaq s_fail2(%rip), %rsi
 	call w_str
@@ -288,7 +345,7 @@ phi512_sigill:
 	call w_str
 	leaq s_fail3(%rip), %rsi
 	call w_str
-	movq %r15, %rcx
+	movq 32(%rsp), %rcx
 	imulq $CD_BYTES, %rcx, %rcx
 	leaq cards(%rip), %rax
 	addq %rcx, %rax
@@ -300,18 +357,17 @@ phi512_sigill:
 	leaq s_fail4(%rip), %rsi
 	call w_str
 	movl SLOT_REPLY + SR_EXIT_KIND(%rcx), %edi
+	pushq %rcx
 	call w_dec
+	popq %rcx
 	leaq s_fail5(%rip), %rsi
 	call w_str
-	movl 32(%rsp), %edi
+	movl 24(%rsp), %edi
+	pushq %rcx
 	call w_sdec
+	popq %rcx
 	leaq s_fail6(%rip), %rsi
 	call w_str
-	movq %r15, %rcx
-	imulq $CD_BYTES, %rcx, %rcx
-	leaq cards(%rip), %rax
-	addq %rcx, %rax
-	movq CD_SLOTP(%rax), %rcx
 	movq SLOT_REPLY + SR_EXIT_RIP(%rcx), %rdi
 	pushq %rcx
 	call w_hexn
@@ -337,8 +393,26 @@ phi512_sigill:
 	addq $SA_BYTES, %rsp
 	jmp .Lout
 
-# seed_of: the seed whose entry is at r12 (its function resolved on first
-# use), in rax, or 0.
+	.bss
+failed_card:	.skip 8
+need_overflow:	.skip 8
+	.text
+
+# stripe_empty: ZF set when stripe r15 has elements (jnz = skip it).
+stripe_empty:
+	leaq stripe_lo(%rip), %rcx
+	movq (%rcx,%r15,8), %rax
+	leaq stripe_hi(%rip), %rcx
+	cmpq (%rcx,%r15,8), %rax
+	jae 1f
+	xorl %eax, %eax				# ZF: not empty
+	ret
+1:	testq %rsp, %rsp			# not ZF: empty
+	ret
+
+# seed_of: the seed whose function holds r12 (resolved on first use), in
+# rax, or 0. The hand-translated blobs expect the state at the function's
+# first AVX-512 instruction, wherever gcc put it.
 seed_of:
 	pushq %rbx
 	pushq %r13
@@ -354,9 +428,7 @@ seed_of:
 	jz 3f
 	movq %rax, SD_ADDR(%rbx)
 	movq %rdx, SD_LEN(%rbx)
-2:	# inside the function: the hand-translated blobs expect the state
-	# at the function's first AVX-512 instruction, wherever gcc put it
-	movq SD_ADDR(%rbx), %rax
+2:	movq SD_ADDR(%rbx), %rax
 	cmpq %rax, %r12
 	jb 3f
 	addq SD_LEN(%rbx), %rax
@@ -426,10 +498,9 @@ file_from_frame:
 	movq UC_FPREGS(%r12), %rsi
 	testq %rsi, %rsi
 	jz 9f
-	# xmm0..15: 16 bytes each at FX_XMM0; ymm halves at ymm_off
 	xorl %ecx, %ecx
 2:	cmpl $16, %ecx
-	jae 3f
+	jae 9f
 	movq %rcx, %rax
 	shlq $4, %rax
 	movq FX_XMM0(%rsi,%rax), %rdx
@@ -447,14 +518,37 @@ file_from_frame:
 	movq %rdx, REGS_ZMM + 24(%rbx,%rdi)
 21:	incl %ecx
 	jmp 2b
-3:
 9:	popq %r12
 	popq %rbx
 	ret
 
-# stripe_resident(stripe rdi, seed rsi): every chunk the stripe's
-# operands touch, resident on the stripe's card; eax 0 or a status.
-stripe_resident:
+# op_range(op r15, stripe r12): the bytes the operand covers for the
+# stripe: start in rdi, end in rdx (a fixed operand: its bytes; an
+# indexed one: the stripe's elements times the stride).
+op_range:
+	movl OP_REG(%r15), %ecx
+	leaq file_in(%rip), %r8
+	movq REGS_GPR(%r8,%rcx,8), %rdi		# the pointer
+	cmpl $OPK_FIXED, OP_KIND(%r15)
+	je 1f
+	movl OP_STRIDE(%r15), %ecx
+	leaq stripe_lo(%rip), %rdx
+	movq (%rdx,%r12,8), %rsi
+	imulq %rcx, %rsi
+	leaq stripe_hi(%rip), %rdx
+	movq (%rdx,%r12,8), %rdx
+	imulq %rcx, %rdx
+	addq %rdi, %rdx				# end
+	addq %rsi, %rdi				# start
+	ret
+1:	movl OP_LEN(%r15), %edx
+	addq %rdi, %rdx
+	ret
+
+# stripe_needs(stripe rdi, seed rsi): every chunk the stripe's operands
+# touch, queued on the stripe's card with the units it reads (none for a
+# written operand) that the card does not hold yet.
+stripe_needs:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
@@ -472,58 +566,175 @@ stripe_resident:
 	movq %r14, %r15
 	shlq $4, %r15
 	leaq SD_OPS(%r13,%r15), %r15		# the op
-	movl OP_KIND(%r15), %eax
-	testl %eax, %eax
-	jz 7f
-	movl OP_REG(%r15), %ecx
-	leaq file_in(%rip), %r8
-	movq REGS_GPR(%r8,%rcx,8), %rdi		# the pointer
-	cmpl $OPK_FIXED, %eax
-	je 2f
-	movl OP_STRIDE(%r15), %ecx
-	leaq stripe_lo(%rip), %rdx
-	movq (%rdx,%r12,8), %rsi
-	imulq %rcx, %rsi
-	leaq stripe_hi(%rip), %rdx
-	movq (%rdx,%r12,8), %rdx
-	imulq %rcx, %rdx
-	addq %rdi, %rdx				# end
-	addq %rsi, %rdi				# start
-	jmp 3f
-2:	movl OP_LEN(%r15), %edx
-	addq %rdi, %rdx
-3:	# every chunk of [rdi, rdx)
-	andq $-CHUNK, %rdi
-4:	cmpq %rdx, %rdi
+	cmpl $OPK_NONE, OP_KIND(%r15)
+	je 7f
+	call op_range				# rdi start, rdx end
+	movq %rdi, %r8
+	andq $-CHUNK, %r8			# the first chunk
+2:	cmpq %rdx, %r8
 	jae 7f
-	pushq %rdi
-	pushq %rdx
-	movq %rdi, %rsi
+	# the units of [start, end) within this chunk
+	movq %rdi, %rax
+	cmpq %r8, %rax
+	jae 21f
+	movq %r8, %rax
+21:	subq %r8, %rax				# low offset in the chunk
+	shrq $16, %rax				# low unit
+	movq %rdx, %rcx
+	leaq CHUNK(%r8), %rsi
+	cmpq %rsi, %rcx
+	jbe 22f
+	movq %rsi, %rcx
+22:	subq %r8, %rcx				# high offset
+	addq $UNIT - 1, %rcx
+	shrq $16, %rcx				# high unit (exclusive)
+	movl $1, %esi
+	shlq %cl, %rsi
+	decq %rsi				# (1 << hi) - 1
+	movl $1, %r9d
+	movl %eax, %ecx
+	shlq %cl, %r9
+	decq %r9				# (1 << lo) - 1
+	notq %r9
+	andq %r9, %rsi				# the units
+	xorl %r9d, %r9d				# class 0: read
+	cmpl $OPK_WRITE, OP_KIND(%r15)
+	jne 23f
+	xorl %esi, %esi				# written: the page only
+	movl $1, %r9d
+23:	pushq %rdi				# start
+	pushq %rdx				# end
+	pushq %r8				# chunk
+	pushq %r9				# class
+	pushq %rsi				# units
 	movq %rbx, %rdi
-	movl OP_KIND(%r15), %edx
-	cmpl $OPK_WRITE, %edx
-	sete %dl
-	movzbl %dl, %edx
-	call card_resident
+	movq %r8, %rsi
+	movl 0(%rsp), %edx
+	call card_need				# eax needed units, edx 1 = no entry
+	movl %eax, %r10d
+	movl %edx, %r11d
+	popq %rsi
+	popq %r9
+	testl %r10d, %r10d
+	jnz 24f
+	testl %r11d, %r11d
+	jz 25f
+24:	movq %r12, %rdi
+	movq 0(%rsp), %rsi			# chunk
+	movl %r10d, %edx
+	movl %r9d, %ecx
+	call need_add
+25:	popq %r8
 	popq %rdx
 	popq %rdi
-	testl %eax, %eax
-	jnz 9f
-	addq $CHUNK, %rdi
-	jmp 4b
+	addq $CHUNK, %r8
+	jmp 2b
 7:	incl %r14d
 	jmp 1b
-8:	xorl %eax, %eax
-9:	popq %r15
+8:	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12
 	popq %rbx
 	ret
 
-# stripe_push(stripe rdi, seed rsi): the stripe's written operands back
-# from its card; eax 0 or a status.
-stripe_push:
+# need_add(card index rdi, chunk rsi, units edx, class ecx): into the
+# card's queue, merged with an entry for the same chunk.
+need_add:
+	movq %rdi, %rax
+	imulq $NEED_MAX * NQ_BYTES, %rax, %rax
+	leaq need_q(%rip), %r8
+	addq %rax, %r8				# the queue
+	leaq need_n(%rip), %r9
+	movq (%r9,%rdi,8), %r10			# its count
+	xorl %eax, %eax
+1:	cmpq %r10, %rax
+	jae 2f
+	movq %rax, %r11
+	shlq $4, %r11
+	cmpq NQ_CHUNK(%r8,%r11), %rsi
+	je 3f
+	incq %rax
+	jmp 1b
+2:	cmpq $NEED_MAX, %r10
+	jb 21f
+	movq $1, need_overflow(%rip)		# full: the call fails before it runs
+	jmp 9f
+21:
+	movq %r10, %r11
+	shlq $4, %r11
+	movq %rsi, NQ_CHUNK(%r8,%r11)
+	movl $0, NQ_UNITS(%r8,%r11)
+	movl %ecx, NQ_CLASS(%r8,%r11)
+	incq (%r9,%rdi,8)
+3:	orl %edx, NQ_UNITS(%r8,%r11)
+	cmpl NQ_CLASS(%r8,%r11), %ecx
+	jae 9f
+	movl %ecx, NQ_CLASS(%r8,%r11)		# a read wins
+9:	ret
+
+# resident_rounds: while a card has needs queued, one K_RESIDENT per
+# card posted, then each waited for; eax 0, else the status with the
+# card in failed_card.
+resident_rounds:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+1:	xorl %r13d, %r13d			# posted this round
+	xorl %ebx, %ebx
+2:	cmpq ncards(%rip), %rbx
+	jae 4f
+	leaq need_i(%rip), %rax
+	movq (%rax,%rbx,8), %rcx
+	leaq need_n(%rip), %rax
+	cmpq (%rax,%rbx,8), %rcx
+	jae 3f
+	movq %rbx, %rax
+	imulq $NEED_MAX * NQ_BYTES, %rax, %rax
+	leaq need_q(%rip), %r8
+	addq %rax, %r8
+	shlq $4, %rcx
+	addq %rcx, %r8				# the entry
+	leaq need_i(%rip), %rax
+	incq (%rax,%rbx,8)
+	movq %rbx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rax
+	addq %rax, %rdi
+	movq NQ_CHUNK(%r8), %rsi
+	movl NQ_UNITS(%r8), %edx
+	movl NQ_CLASS(%r8), %ecx
+	call card_resident_post
+	incl %r13d
+3:	incq %rbx
+	jmp 2b
+4:	testl %r13d, %r13d
+	jz 8f
+	xorl %ebx, %ebx
+5:	cmpq ncards(%rip), %rbx
+	jae 1b
+	movq %rbx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rax
+	addq %rax, %rdi
+	cmpq $0, CD_POSTED(%rdi)
+	je 6f
+	call card_resident_done
+	testl %eax, %eax
+	jnz 9f
+6:	incq %rbx
+	jmp 5b
+8:	xorl %eax, %eax
+	jmp 10f
+9:	movq %rbx, failed_card(%rip)
+10:	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# stripe_pushes(stripe rdi, seed rsi): the stripe's written ranges queued
+# on its card.
+stripe_pushes:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
@@ -531,10 +742,6 @@ stripe_push:
 	pushq %r15
 	movq %rdi, %r12
 	movq %rsi, %r13
-	movq %r12, %rbx
-	imulq $CD_BYTES, %rbx, %rbx
-	leaq cards(%rip), %rax
-	addq %rax, %rbx
 	xorl %r14d, %r14d
 1:	cmpl $4, %r14d
 	jae 8f
@@ -543,29 +750,109 @@ stripe_push:
 	leaq SD_OPS(%r13,%r15), %r15
 	cmpl $OPK_WRITE, OP_KIND(%r15)
 	jne 7f
-	movl OP_REG(%r15), %ecx
-	leaq file_in(%rip), %r8
-	movq REGS_GPR(%r8,%rcx,8), %rsi
-	movl OP_STRIDE(%r15), %ecx
-	leaq stripe_lo(%rip), %rdx
-	movq (%rdx,%r12,8), %rax
-	imulq %rcx, %rax
-	addq %rax, %rsi				# the address
-	leaq stripe_hi(%rip), %rdx
-	movq (%rdx,%r12,8), %rdx
-	leaq stripe_lo(%rip), %rax
-	subq (%rax,%r12,8), %rdx
-	imulq %rcx, %rdx			# the bytes
-	movq %rbx, %rdi
-	call card_push
-	testl %eax, %eax
-	jnz 9f
+	call op_range				# rdi start, rdx end
+	subq %rdi, %rdx				# the bytes
+	movq %r12, %rax
+	imulq $PUSH_MAX * PQ_BYTES, %rax, %rax
+	leaq push_q(%rip), %r8
+	addq %rax, %r8
+	leaq push_n(%rip), %r9
+	movq (%r9,%r12,8), %rcx
+	cmpq $PUSH_MAX, %rcx
+	jae 7f
+	imulq $PQ_BYTES, %rcx, %rcx
+	movq %rdi, PQ_ADDR(%r8,%rcx)
+	movq %rdx, PQ_LEN(%r8,%rcx)
+	movq $0, PQ_DONE(%r8,%rcx)
+	incq (%r9,%r12,8)
 7:	incl %r14d
 	jmp 1b
-8:	xorl %eax, %eax
-9:	popq %r15
+8:	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12
 	popq %rbx
 	ret
+
+# push_rounds: while a card has bytes to fetch, one K_PUSH piece per
+# card posted, then each waited for and copied out; eax 0, else the
+# status with the card in failed_card.
+push_rounds:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+1:	xorl %r13d, %r13d			# posted this round
+	xorl %ebx, %ebx
+2:	cmpq ncards(%rip), %rbx
+	jae 5f
+	# the card's first range with bytes left
+	movq %rbx, %rax
+	imulq $PUSH_MAX * PQ_BYTES, %rax, %rax
+	leaq push_q(%rip), %r8
+	addq %rax, %r8
+	leaq push_n(%rip), %r9
+	movq (%r9,%rbx,8), %r10
+	xorl %ecx, %ecx
+3:	cmpq %r10, %rcx
+	jae 4f
+	movq %rcx, %r11
+	imulq $PQ_BYTES, %r11, %r11
+	movq PQ_LEN(%r8,%r11), %rdx
+	subq PQ_DONE(%r8,%r11), %rdx
+	jnz 31f
+	incq %rcx
+	jmp 3b
+31:	leaq (%r8,%r11), %r14			# the range
+	movq PQ_ADDR(%r14), %rsi
+	addq PQ_DONE(%r14), %rsi		# the piece: to the chunk's end at most
+	movq %rsi, %rax
+	andq $CHUNK - 1, %rax
+	movq $CHUNK, %rcx
+	subq %rax, %rcx
+	cmpq %rcx, %rdx
+	jbe 32f
+	movq %rcx, %rdx
+32:
+	addq %rdx, PQ_DONE(%r14)
+	movq %rbx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rax
+	addq %rax, %rdi
+	call card_push_post
+	incl %r13d
+4:	incq %rbx
+	jmp 2b
+5:	testl %r13d, %r13d
+	jz 8f
+	xorl %ebx, %ebx
+6:	cmpq ncards(%rip), %rbx
+	jae 1b
+	movq %rbx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rax
+	addq %rax, %rdi
+	cmpq $0, CD_POSTED(%rdi)
+	je 7f
+	call card_push_done
+	testl %eax, %eax
+	jnz 9f
+7:	incq %rbx
+	jmp 6b
+8:	xorl %eax, %eax
+	jmp 10f
+9:	movq %rbx, failed_card(%rip)
+10:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# w_us(rdi ns): the nanoseconds as microseconds, appended.
+w_us:
+	movq %rdi, %rax
+	xorl %edx, %edx
+	movl $1000, %ecx
+	divq %rcx
+	movq %rax, %rdi
+	jmp w_dec

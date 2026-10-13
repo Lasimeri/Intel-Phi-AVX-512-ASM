@@ -107,7 +107,7 @@ else
         # so a second thread per core only polls beside them (the default,
         # 114, is the matrix multiplies'; card/vpu/vpu_worker.md).
         # (the restart's preload needs slots and a pool: -S 12 -C 4 -R 64.)
-        PHI_VPU_ARGS="${PHI_VPU_ARGS:-${PHI512_V3:+-S 1 -C 57 -T 2 -R 128 -s 1000}}" "$root/scripts/phi-vpu.sh" -c "$card" start 57 >&2 </dev/null || {
+        PHI_VPU_ARGS="${PHI_VPU_ARGS:-${PHI512_V3:+-S 1 -C 55 -T 2 -R 128 -s 1000}}" "$root/scripts/phi-vpu.sh" -c "$card" start 57 >&2 </dev/null || {
             echo "phi512: could not start the worker on card $card (is the card up? phi -c $card status)" >&2
             exit 1
         }

@@ -385,7 +385,7 @@ fill_regs:
 	ret
 
 # post_and_wait(kind esi): the slot's request sequence number bumped, the
-# kind written, a fence, the u16 (kind in its top four bits, the sequence
+# kind written, a fence, the u16 (kind in its top five bits, the sequence
 # number in the low twelve) into the SLOTSEQ line; then a spin on the
 # reply's sequence number, 1 s at most. rax the round trip in ns, or -1
 # on timeout.
@@ -404,9 +404,9 @@ post_and_wait:
 	call now_ns
 	movq %rax, %r13
 	movq seq(%rip), %rax
-	andl $0xfff, %eax
+	andl $0x7ff, %eax
 	movl %r12d, %ecx
-	shll $12, %ecx
+	shll $11, %ecx
 	orl %ecx, %eax
 	movq base(%rip), %rcx
 	movq slot(%rip), %rdx

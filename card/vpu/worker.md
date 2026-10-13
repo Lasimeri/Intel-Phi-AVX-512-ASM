@@ -161,3 +161,13 @@ The pool parks on a futex after `-s MS` of idleness and a wake costs
 about 5 ms, so a session of many short requests runs the worker with
 `-s 1000`: `scripts/phi512.sh` starts it as `-S 1 -C 57 -T 2 -R 128 -s
 1000` under `PHI512_V3=1`.
+
+## The layout for one program (2026-10-13, later)
+
+`-S 1 -C 55 -T 2 -R 128 -s 1000`: 110 pool threads on cores 0 to 54
+(hardware threads 0 and 3), the slot's control thread alone on core 55's
+thread 0, the dispatcher on core 56's thread 3 (CPU 0) with the wide pool
+asleep beside it. CPU numbering on the card: core c's hardware thread h is
+CPU 4c + h + 1 for c < 56; core 56's are CPUs 225, 226, 227 and 0. The
+worker reserves the program's address range first thing
+([`resident.md`](resident.md)).

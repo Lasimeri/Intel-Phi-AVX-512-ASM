@@ -1,9 +1,10 @@
 # card.S: the cards the preload library drives: each card's window, the
-# slot this process uses on it, requests posted and waited for, chunks of
-# the program's memory made resident (staged into the window, K_RESIDENT),
-# function instances run (K_FEXEC) and their outputs fetched (K_PUSH).
-# One slot per card, one process; every request waits in turn except the
-# instances of one call, which run on all the cards at once. See card.md.
+# slot this process uses on it, requests posted and waited for, the
+# program's memory made resident by 64 KiB units (K_RESIDENT with a
+# fill range, staged through the window), function instances run
+# (K_FEXEC) and their outputs fetched (K_PUSH). One slot per card, one
+# process; one request in flight per card, the four cards at once
+# (sigill.S's rounds). See card.md.
 
 	.include "common.inc"
 	.include "proto.inc"
@@ -21,9 +22,10 @@ cards:	.skip MAX_CARDS * CD_BYTES
 ncards:	.skip 8
 	.balign 64
 res_entries:	.skip MAX_CARDS * RES_TAB_CAP * RES_ENTRY
-	.globl stat_resident, stat_resident_ns, stat_push_ns
-stat_resident:	.skip 8			# chunks made resident
+	.globl stat_resident, stat_resident_ns, stat_push_ns, stat_resident_bytes
+stat_resident:	.skip 8			# fills (K_RESIDENT with bytes)
 stat_resident_ns:	.skip 8
+stat_resident_bytes:	.skip 8
 stat_push_ns:	.skip 8
 	.globl fexec_threads
 fexec_threads:	.skip 8			# PHI512_THREADS: card threads an instance may split over (114)
@@ -37,7 +39,6 @@ s_open1:	.asciz "phi512: card "
 s_open2:	.asciz ": no window (is the card up?)"
 s_open3:	.asciz ": no worker polling"
 s_load:	.asciz ": K_LOAD refused, status "
-
 s_flush:	.asciz ": K_FLUSH refused (an older worker?)"
 
 	.text
@@ -49,8 +50,6 @@ s_flush:	.asciz ": K_FLUSH refused (an older worker?)"
 cards_init:
 	pushq %rbx
 	pushq %r12
-	pushq %r13
-	pushq %r14
 	movq $0, ncards(%rip)
 	leaq s_env_threads(%rip), %rdi
 	movl $114, %esi
@@ -96,8 +95,6 @@ cards_init:
 41:	incl %r12d
 	jmp 4b
 5:	movq ncards(%rip), %rax
-	popq %r14
-	popq %r13
 	popq %r12
 	popq %rbx
 	ret
@@ -146,6 +143,7 @@ card_add:
 	movq %rdx, CD_DATAP(%rbx)
 	movq $0, CD_SEQ(%rbx)
 	movq $0, CD_STAGE(%rbx)
+	movq $0, CD_POSTED(%rbx)
 	# the slot opened: its u16 to 0, the stale reply number to 0
 	movq CD_SLOT(%rbx), %rdx
 	movw $0, OFF_SLOTSEQ(%rcx,%rdx,2)
@@ -165,7 +163,6 @@ card_add:
 	call card_wait
 	testl %eax, %eax
 	jnz .Lca_flush
-	# the residency table
 	movq ncards(%rip), %rax
 	imulq $RES_TAB_CAP * RES_ENTRY, %rax, %rax
 	leaq res_entries(%rip), %rcx
@@ -229,7 +226,7 @@ card_add:
 
 # card_load_seed(card rdi, seed index rsi): the seed's blob into the
 # slot's part of LOADAREA, K_LOAD under fn_id = index + 1; eax 0 or the
-# status.
+# status. Verbose: the blob's card address.
 card_load_seed:
 	pushq %rbx
 	pushq %r12
@@ -244,11 +241,9 @@ card_load_seed:
 	addq CD_BASE(%rbx), %rdi
 	movq SD_BLOB(%rcx), %rsi
 	movq SD_BLOB_LEN(%rcx), %rdx
-	pushq %rcx
 	call mem_copy
-	popq %rcx
 	movq %rbx, %rdi
-	call card_clear_request			# clobbers rcx: the seed again
+	call card_clear_request
 	imulq $SD_BYTES, %r12, %rcx
 	leaq seeds(%rip), %rax
 	addq %rax, %rcx
@@ -302,7 +297,8 @@ card_clear_request:
 	ret
 
 # card_post(card rdi, kind esi): the next sequence number into the
-# request, the kind, a fence, the u16 (kind in its top four bits).
+# request, the kind, a fence, the u16 (kind in its top five bits, the
+# sequence number's low eleven below).
 	.globl card_post
 card_post:
 	movq CD_SLOTP(%rdi), %rcx
@@ -311,8 +307,8 @@ card_post:
 	movq %rax, SL_SEQ(%rcx)
 	movl %esi, SL_KIND(%rcx)
 	FENCE
-	andl $0xfff, %eax
-	shll $12, %esi
+	andl $0x7ff, %eax
+	shll $11, %esi
 	orl %esi, %eax
 	movq CD_BASE(%rdi), %rcx
 	movq CD_SLOT(%rdi), %rdx
@@ -348,80 +344,141 @@ card_wait:
 	popq %rbx
 	ret
 
-# card_resident(card rdi, chunk address rsi, class edx): the chunk on the
-# card: already in the table, or staged (a 2 MiB copy into the next
-# staging slot), K_RESIDENT, waited for, entered. eax 0, or the status.
-	.globl card_resident
-card_resident:
+# card_need(card rdi, chunk rsi, units edx): the units of the chunk the
+# card does not hold yet, in eax; edx 1 when the chunk has no entry at
+# all (a request is needed even for 0 units: the page).
+	.globl card_need
+card_need:
+	pushq %rbx
+	movl %edx, %ebx
+	leaq CD_TAB(%rdi), %rdi
+	call tab_find
+	testq %rax, %rax
+	jz 1f
+	movl RE_FILLED(%rax), %ecx
+	notl %ecx
+	andl %ecx, %ebx
+	movl %ebx, %eax
+	xorl %edx, %edx
+	popq %rbx
+	ret
+1:	movl %ebx, %eax
+	movl $1, %edx
+	popq %rbx
+	ret
+
+# card_resident_post(card rdi, chunk rsi, units edx, class ecx): the
+# units' span staged into the next staging slot (the parts the program
+# has mapped, through copy_mapped) and K_RESIDENT posted with the fill
+# range (0 bytes when no unit: the page only). Kept as the card's
+# pending request for card_resident_done.
+	.globl card_resident_post
+card_resident_post:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
 	pushq %r14
+	pushq %r15
 	movq %rdi, %rbx
 	movq %rsi, %r12
 	movl %edx, %r13d
-	leaq CD_TAB(%rbx), %rdi
-	movq %r12, %rsi
-	call tab_find
-	testq %rax, %rax
-	jnz 8f
-	call now_ns
-	movq %rax, %r14
+	movl %ecx, %r14d
+	movq %r12, CD_PEND_CHUNK(%rbx)
+	movl %r13d, CD_PEND_UNITS(%rbx)
+	movl %r14d, CD_PEND_CLASS(%rbx)
 	# the staging slot, round robin
-	movq CD_STAGE(%rbx), %rax
-	movq %rax, %rcx
+	movq CD_STAGE(%rbx), %r15
+	movq %r15, %rcx
 	incq %rcx
 	andq $STAGING_SLOTS - 1, %rcx
 	movq %rcx, CD_STAGE(%rbx)
-	pushq %rax
-	shlq $21, %rax
-	addq $OFF_RESIDENT, %rax
-	addq CD_BASE(%rbx), %rax
-	movq %rax, %rdi
-	# the parts of the chunk the program has mapped readable (an array
-	# may start or end inside the 2 MiB, with nothing beside it)
-	movq %r12, %rsi
-	movl $CHUNK, %edx
+	xorl %r8d, %r8d				# off
+	xorl %r9d, %r9d				# len
+	testl %r13d, %r13d
+	jz 2f
+	bsfl %r13d, %eax
+	shll $16, %eax
+	movl %eax, %r8d				# the lowest unit's offset
+	bsrl %r13d, %ecx
+	incl %ecx
+	shll $16, %ecx
+	subl %eax, %ecx
+	movl %ecx, %r9d				# the span's bytes
+	movq %r15, %rdi
+	shlq $21, %rdi
+	addq $OFF_RESIDENT, %rdi
+	addq CD_BASE(%rbx), %rdi
+	addq %r8, %rdi
+	leaq (%r12,%r8), %rsi
+	movq %r9, %rdx
+	pushq %r8
+	pushq %r9
 	call copy_mapped
-	popq %rax
-	pushq %rax
+	popq %r9
+	popq %r8
+	addq %r9, stat_resident_bytes(%rip)
+	incq stat_resident(%rip)
+2:	pushq %r8
+	pushq %r9
 	movq %rbx, %rdi
 	call card_clear_request
-	popq %rax
+	popq %r9
+	popq %r8
 	movq CD_SLOTP(%rbx), %rcx
 	movq %r12, SL_FN_ID(%rcx)
-	movq %rax, SL_ENTRY(%rcx)
-	movl %r13d, SL_THREADS(%rcx)
+	movq %r15, SL_ENTRY(%rcx)
+	movl %r14d, SL_THREADS(%rcx)
+	movq %r8, SL_FILL_OFF(%rcx)
+	movq %r9, SL_FILL_LEN(%rcx)
 	movq %rbx, %rdi
 	movl $K_RESIDENT, %esi
 	call card_post
-	movq %rbx, %rdi
-	call card_wait
-	testl %eax, %eax
-	jnz 9f
-	leaq CD_TAB(%rbx), %rdi
-	movq %r12, %rsi
-	call tab_insert
-	testq %rax, %rax
-	jz 9f
-	movq CD_SLOTP(%rbx), %rcx
-	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %rdx
-	movq %rdx, RE_PAGE(%rax)
-	movl %r13d, RE_CLASS(%rax)
-	incq stat_resident(%rip)
-	call now_ns
-	subq %r14, %rax
-	addq %rax, stat_resident_ns(%rip)
-8:	xorl %eax, %eax
-9:	popq %r14
+	movq $1, CD_POSTED(%rbx)
+	popq %r15
+	popq %r14
 	popq %r13
 	popq %r12
 	popq %rbx
 	ret
 
+# card_resident_done(card rdi): the pending K_RESIDENT waited for and
+# its chunk entered (the page, the units added); eax 0 or the status.
+	.globl card_resident_done
+card_resident_done:
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %rbx
+	call now_ns
+	movq %rax, %r12
+	movq %rbx, %rdi
+	call card_wait
+	movq $0, CD_POSTED(%rbx)
+	testl %eax, %eax
+	jnz 9f
+	leaq CD_TAB(%rbx), %rdi
+	movq CD_PEND_CHUNK(%rbx), %rsi
+	call tab_insert
+	testq %rax, %rax
+	jz 8f
+	movq CD_SLOTP(%rbx), %rcx
+	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %rdx
+	movq %rdx, RE_PAGE(%rax)
+	movl CD_PEND_CLASS(%rbx), %ecx
+	movl %ecx, RE_CLASS(%rax)
+	movl CD_PEND_UNITS(%rbx), %ecx
+	orl %ecx, RE_FILLED(%rax)
+	call now_ns
+	subq %r12, %rax
+	addq %rax, stat_resident_ns(%rip)
+8:	xorl %eax, %eax
+9:	popq %r12
+	popq %rbx
+	ret
+
 # card_fexec_post(card rdi, seed rsi, file rdx (REGS_BYTES), lo rcx, hi r8):
 # the file into the slot's SD_REGS_IN with the induction and bound
-# registers set, the request (fn_id = seed index + 1, entry the seed's),
+# registers set, the request (fn_id = seed index + 1, entry 0: a hand-
+# translated blob starts at the fault point, the split, the threads),
 # posted. The caller waits (card_wait) when every instance is posted.
 	.globl card_fexec_post
 card_fexec_post:
@@ -456,7 +513,7 @@ card_fexec_post:
 	divq %r8
 	incq %rax
 	movq %rax, SL_FN_ID(%rcx)
-	movq $0, SL_ENTRY(%rcx)			# the hand-translated blobs start at the fault point
+	movq $0, SL_ENTRY(%rcx)
 	movq fexec_threads(%rip), %rax
 	movl %eax, SL_THREADS(%rcx)
 	movl SD_IND(%r12), %eax
@@ -475,54 +532,61 @@ card_fexec_post:
 	popq %rbx
 	ret
 
-# card_push(card rdi, address rsi, bytes rdx): the program's bytes from
-# the card's memory into the program's, in pieces of SD_WB_BYTES (K_PUSH,
-# then a copy out of the slot's SD_WB). eax 0, or the status.
-	.globl card_push
-card_push:
+# card_push_post(card rdi, address rsi, bytes rdx): K_PUSH for one piece
+# of the program's memory (within one chunk, at most 2 MiB, 64-aligned):
+# the engine copies it from the resident page into the window's next
+# staging slot; kept as the card's pending request.
+	.globl card_push_post
+card_push_post:
 	pushq %rbx
-	pushq %r12
-	pushq %r13
-	pushq %r14
-	pushq %r15
 	movq %rdi, %rbx
-	movq %rsi, %r12
-	movq %rdx, %r13
-	call now_ns
-	movq %rax, %r15
-1:	testq %r13, %r13
-	jz 8f
-	movq %r13, %r14
-	cmpq $SD_WB_BYTES, %r14
-	jbe 2f
-	movq $SD_WB_BYTES, %r14
-2:	movq %rbx, %rdi
+	movq %rsi, CD_PEND_ADDR(%rbx)
+	movq %rdx, CD_PEND_LEN(%rbx)
 	call card_clear_request
+	movq CD_STAGE(%rbx), %rax
+	movq %rax, %rcx
+	incq %rcx
+	andq $STAGING_SLOTS - 1, %rcx
+	movq %rcx, CD_STAGE(%rbx)
+	movq %rax, CD_PEND_UNITS(%rbx)		# the staging slot, for the copy out
 	movq CD_SLOTP(%rbx), %rcx
-	movq %r12, SL_FN_ID(%rcx)
-	movq %r14, SL_ENTRY(%rcx)
+	movq %rax, SL_ENTRY(%rcx)
+	movq CD_PEND_ADDR(%rbx), %rax
+	movq %rax, SL_FN_ID(%rcx)
+	movq CD_PEND_LEN(%rbx), %rax
+	movq %rax, SL_FILL_LEN(%rcx)
 	movq %rbx, %rdi
 	movl $K_PUSH, %esi
 	call card_post
+	movq $1, CD_POSTED(%rbx)
+	popq %rbx
+	ret
+
+# card_push_done(card rdi): the pending K_PUSH waited for, the piece
+# copied out of SD_WB into the program's memory; eax 0 or the status.
+	.globl card_push_done
+card_push_done:
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %rbx
+	call now_ns
+	movq %rax, %r12
 	movq %rbx, %rdi
 	call card_wait
+	movq $0, CD_POSTED(%rbx)
 	testl %eax, %eax
 	jnz 9f
-	movq %r12, %rdi
-	movq CD_DATAP(%rbx), %rsi
-	addq $SD_WB, %rsi
-	movq %r14, %rdx
+	movq CD_PEND_ADDR(%rbx), %rdi
+	movq CD_PEND_UNITS(%rbx), %rsi		# the staging slot
+	shlq $21, %rsi
+	addq $OFF_RESIDENT, %rsi
+	addq CD_BASE(%rbx), %rsi
+	movq CD_PEND_LEN(%rbx), %rdx
 	call mem_copy
-	addq %r14, %r12
-	subq %r14, %r13
-	jmp 1b
-8:	call now_ns
-	subq %r15, %rax
+	call now_ns
+	subq %r12, %rax
 	addq %rax, stat_push_ns(%rip)
 	xorl %eax, %eax
-9:	popq %r15
-	popq %r14
-	popq %r13
-	popq %r12
+9:	popq %r12
 	popq %rbx
 	ret

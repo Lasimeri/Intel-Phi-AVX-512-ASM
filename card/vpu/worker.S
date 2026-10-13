@@ -279,6 +279,7 @@ _start:
 	testq %rax, %rax
 	js .Lopen_fail_host
 	movq %rax, %r14
+	call reserve_high			# the program's address range, before any mapping of ours
 	xorl %edi, %edi
 	movl $CTRL_BYTES, %esi
 	movl $PROT_READ | PROT_WRITE, %edx

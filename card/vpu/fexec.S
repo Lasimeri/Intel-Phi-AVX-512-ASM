@@ -363,18 +363,15 @@ fexec_run:
 25:	movq $1, fx_in_run(%rip)
 	call now_ns
 	movq %rax, 8(%rsp)
-	cmpl $1, %r14d
-	jne 241f
-	xorl %edi, %edi				# one slice: this thread, no pool wake
-	xorl %esi, %esi
-	movl $1, %edx
-	call fx_slice
-	jmp 242f
-241:	leaq fx_slice(%rip), %rdi
+	leaq fx_slice(%rip), %rdi
 	xorl %esi, %esi
 	movl %r14d, %edx
-	call vpu_pool_map
-242:	call now_ns
+	cmpl $1, %r14d
+	jne 241f
+	movl $2, %edx				# one slice: on pool thread 0 (this thread's
+						# core is the control plane's), the second empty
+241:	call vpu_pool_map
+	call now_ns
 	subq 8(%rsp), %rax
 	movq %rax, SR_RUN_NS(%r13)
 	movq $0, fx_in_run(%rip)
@@ -401,7 +398,10 @@ fexec_run:
 26:	incl %ecx
 	jmp 28b
 27:	leal -1(%r14d), %eax
-	imulq $CTX_BYTES, %rax, %rsi
+	cmpq $0, fx_step(%rip)
+	jne 271f
+	xorl %eax, %eax				# not split: slice 0's file
+271:	imulq $CTX_BYTES, %rax, %rsi
 	leaq fx_ctx(%rip), %rax
 	addq %rax, %rsi				# the last slice's context
 	movq CTX_FLAGS_RAW(%rsi), %rax
@@ -639,8 +639,11 @@ fx_slice:
 	movq fx_hi(%rip), %rcx
 1:	movl $CTX_KIND_STUB, CTX_KIND(%rbx)
 	cmpq $0, fx_step(%rip)
-	je 2f					# not split: the file as it is
-	cmpq %rcx, %rax
+	jne 11f
+	testl %r12d, %r12d
+	jnz 9f					# not split: slice 0 runs the file as it is, the rest nothing
+	jmp 2f
+11:	cmpq %rcx, %rax
 	jae 9f					# empty: nothing to run
 	movq %rax, %r8
 	movq %rcx, %r9

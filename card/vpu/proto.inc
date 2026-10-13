@@ -287,7 +287,9 @@
 	.set SL_DEFER_CAP, 324
 	.set SL_WB_N, 328
 	.set SL_WB_BYTES, 332
-	.set SL_REQ_BYTES, 336
+	.set SL_FILL_OFF, 336
+	.set SL_FILL_LEN, 344
+	.set SL_REQ_BYTES, 352
 	.set SLOT_REPLY, 2048
 	.set SR_SEQ, 0
 	.set SR_STATUS, 8
