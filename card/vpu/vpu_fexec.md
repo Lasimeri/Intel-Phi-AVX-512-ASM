@@ -37,6 +37,28 @@ A reply's `exit_kind` says how the instance left: `VPU_X_RET` (0) through
 `exit_aux`), an instruction the card cannot run, a split loop's head
 reached (the loop in `exit_aux`), a full deferred list, a limit.
 
+## The doorbell's u16
+
+The u16 a host thread writes at `448 + 2 slot` carries the kind in its
+top four bits and the request's sequence number in the low twelve
+(`(kind << 12) | (seq & 0xfff)`): the dispatcher reads the kind from it
+without touching the request block and, for `K_FEXEC`, pulls the slot's
+register block (`SD_REGS_IN`, 2368 bytes) with the DMA engine into the
+slot's 64 KiB of the landing area before the hand-off. A u16 with kind 0
+(the ping driver's) leaves the kind to the request block.
+
+## K_LOAD and K_FEXEC as served today (stage 2, first increment)
+
+`K_LOAD`: `fn_id` names the blob, `entry` is its byte count, the bytes
+sit in the slot's 512 KiB part of `LOADAREA` (`80 MiB + slot x 512 KiB`);
+the reply's `exit_aux` is the blob's address in the slot process.
+`K_FEXEC`: `fn_id`, `entry` (the offset into the blob), the register
+file in `SD_REGS_IN` (`vpu_regs` of `vpu_exec.h`, 2256 bytes); the run is
+on the slot's main thread and its own stack with a return stub as the
+return address; the file as left is in `SD_REGS_OUT`, the reply says
+`X_RET`, `X_FAULT` (address in `exit_aux`) or `X_REFUSED` (`exit_rip`).
+Stripes, refresh and the deferred list are not read yet.
+
 ## The structures
 
 `struct vpu_slot_req` (336 bytes, at the slot's start): `seq`, `kind`,

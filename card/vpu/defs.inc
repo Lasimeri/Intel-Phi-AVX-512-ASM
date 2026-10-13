@@ -157,6 +157,7 @@
 	.set SH_JOB_SEQ, 0
 	.set SH_JOB_KIND, 8
 	.set SH_JOB_FLAGS, 12
+	.set SH_PULL_SEQ, 16		# K_FEXEC: the DMA copy of the register block to wait for (0: none)
 	.set SH_DONE_SEQ, 64
 	.set SH_PARKED, 72
 	.set SH_REQUESTS, 128

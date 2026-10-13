@@ -216,7 +216,7 @@ cdma_open:
 	xorl %edi, %edi
 	movl $HUGE_BYTES, %esi
 	movl $PROT_READ | PROT_WRITE, %edx
-	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE | MAP_LOCKED, %r10d
+	movl $MAP_SHARED | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE | MAP_LOCKED, %r10d	# shared: the slot processes forked later read what the engine lands here (sched.md)
 	movq $-1, %r8
 	xorl %r9d, %r9d
 	SYS SYS_mmap

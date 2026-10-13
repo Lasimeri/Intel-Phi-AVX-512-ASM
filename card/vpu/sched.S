@@ -190,7 +190,25 @@ slots_poll:
 	movq %r12, %rax
 	imulq $SH_SLOT_BYTES, %rax, %rax
 	leaq SH_SLOT0(%r13,%rax), %r13		# the slot's block
-	movq %rcx, SH_JOB_SEQ(%r13)
+	# K_FEXEC (the kind rides in the u16's top four bits): the register
+	# block pulled by the DMA engine into this slot's part of the landing
+	# area first; the copy's sequence number goes with the job
+	movq %rcx, %rax
+	shrl $12, %eax
+	movq $0, SH_PULL_SEQ(%r13)
+	cmpl $K_FEXEC, %eax
+	jne 6f
+	pushq %rcx
+	movq %r12, %rdi
+	shlq $20, %rdi
+	addq $OFF_SLOTDATA + SD_REGS_IN, %rdi
+	movq %r12, %rsi
+	imulq $FX_LAND_PER_SLOT, %rsi, %rsi
+	movl $FX_REGS_PULL, %edx
+	call cdma_submit
+	movq %rax, SH_PULL_SEQ(%r13)
+	popq %rcx
+6:	movq %rcx, SH_JOB_SEQ(%r13)
 	FENCE
 	incl slot_posts(%rip)
 	cmpl $2, vpu_verbose(%rip)
@@ -350,6 +368,7 @@ sched_main:
 	movl slot_cores(%rip), %edi
 	imull slot_tpc(%rip), %edi
 	call pool_start
+	call fexec_init
 	movq $0, sched_last(%rip)
 	movq shared(%rip), %r13
 	movq %r12, %rax
@@ -403,7 +422,34 @@ sched_main:
 	movl SH_JOB_KIND(%r13), %eax
 	cmpl $K_PING, %eax
 	je 1f
+	cmpl $K_LOAD, %eax
+	je 11f
+	cmpl $K_FEXEC, %eax
+	je 12f
 	movl $E_KERNEL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+11:	leaq slreq(%rip), %rdi
+	movl %r12d, %esi
+	leaq reply_buf(%rip), %rdx
+	call fexec_load
+	movl %eax, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+12:	# the register block: landed by the dispatcher's DMA (the copy's
+	# sequence number in the job line), waited for on the status word
+	movq SH_PULL_SEQ(%r13), %rdi
+	call land_wait
+	testl %eax, %eax
+	jnz 13f
+	movl $E_PULL, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+13:	leaq slreq(%rip), %rdi
+	movl %r12d, %esi
+	leaq reply_buf(%rip), %rdx
+	movq %r12, %rcx
+	imulq $FX_LAND_PER_SLOT, %rcx, %rcx
+	addq cdma_land(%rip), %rcx
+	call fexec_run
+	movl %eax, reply_buf + SR_STATUS(%rip)
 1:	movq shared(%rip), %rcx
 	movq SHG_FREE_BYTES(%rcx), %rax
 	movq %rax, reply_buf + SR_FREE_BYTES(%rip)
@@ -501,3 +547,35 @@ sched_wait:
 	popq %rbx
 	ret
 
+
+# land_wait(seq rdi): until the DMA engine's status word (the shared page
+# of cdma.S, which this process inherited) reaches seq; eax 1, or 0 after
+# 100 ms. A seq of 0 means no copy was needed. Clobbers rcx, rdx.
+land_wait:
+	testq %rdi, %rdi
+	jz 8f
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %r12
+	call now_ns
+	movq %rax, %rbx
+1:	movq cdma_page(%rip), %rcx
+	movq 4096(%rcx), %rax			# CD_STATUS
+	cmpq %r12, %rax
+	jae 7f
+	movl $WAIT_DELAY, %eax
+	DELAY_EAX
+	call now_ns
+	subq %rbx, %rax
+	cmpq $100000000, %rax
+	jb 1b
+	xorl %eax, %eax
+	popq %r12
+	popq %rbx
+	ret
+7:	movl $1, %eax
+	popq %r12
+	popq %rbx
+	ret
+8:	movl $1, %eax
+	ret
