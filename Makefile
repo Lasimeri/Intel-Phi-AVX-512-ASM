@@ -54,7 +54,14 @@ decode-check: build ## The assembly x86-64 decoder against iced-x86 on the trans
 	host/asm/out/decode-check host/target/release/avx512-xlate > host/asm/out/decode-asm.dump
 	@if cmp -s host/asm/out/decode-iced.dump host/asm/out/decode-asm.dump; then echo "decode-check: $$(wc -l < host/asm/out/decode-asm.dump) instructions identical to iced"; else diff host/asm/out/decode-iced.dump host/asm/out/decode-asm.dump | head -20; echo "decode-check: the decoder differs from iced"; exit 1; fi
 
-check: docs-check fmt clippy build test layout-check mvex-check decode-check ## Everything CI would run
+fnscan-check: decode-check ## The function scan (host/asm/phi512/fnscan.S) over the translator binary: no decode failure, no branch into an instruction
+	as --64 -I host/asm/phi512 -o host/asm/out/p512_fnscan.o host/asm/phi512/fnscan.S
+	gcc -O2 -o host/asm/out/fnscan-check tools/fnscan-check.c host/asm/out/p512_fnscan.o host/asm/out/p512_decode.o
+	host/asm/out/fnscan-check host/target/release/avx512-xlate > host/asm/out/fnscan.txt
+	@tail -1 host/asm/out/fnscan.txt
+	@if tail -1 host/asm/out/fnscan.txt | grep -q "failed 0 badtarget 0 "; then echo "fnscan-check: ok"; else echo "fnscan-check: failures"; exit 1; fi
+
+check: docs-check fmt clippy build test layout-check mvex-check decode-check fnscan-check ## Everything CI would run
 
 clean: ## Remove build outputs
 	cd $(HOST) && cargo clean
