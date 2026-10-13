@@ -312,6 +312,31 @@ and `libggml_phi.so` from this repository.
 
 ## Layout
 
+```
+╔══ host (EPYC 7742 on the rack: no AVX-512) ════════════════════════════════════════════════════╗
+║ program built -mavx512f ──SIGILL──▶ libphi512.so (host/crates/phi512: handler, planner,        ║
+║                                      avx512-xlate EVEX->MVEX, dispatcher)   [being replaced]   ║
+║ llama.cpp ──GGML_BACKEND_PATH──▶ libggml_phi.so (host/asm/ggml-phi + common: the backend)      ║
+║ drivers: phi-vpu (Rust: status, poly, matmul-check); phi-vpu-ping, -fexec, -resident (asm)     ║
+║ scripts: phi512.sh, phi-ggml.sh, phi-vpu.sh (deploy/start/ping/...), stack.sh -> the stack     ║
+║                              │ writes requests, reads replies                                  ║
+║                              ▼                                                                 ║
+║ /dev/shm/phi-hostmem[-N], 2 GiB a card (the window: card/vpu/*.h, proto.inc, layout-checked)   ║
+║   0 READY  64 REQ  256 REPLY  320 STATS  448 SLOTSEQ (u16 x 32)  13312 MATMUL  65536 SLOTS     ║
+║   48 MiB SLOTDATA (1 MiB a slot)  80 MiB LOADAREA  96 MiB RESIDENT  128/640/704 MiB A/B/D      ║
+╚═══════════════════════════════════════╤════════════════════════════════════════════════════════╝
+                                        │ PCIe Gen2 x8, 3.2 GB/s a card: uncached loads, posted stores, DMA ch 7
+╔═══════════════════════════════════════╧═ card N (Xeon Phi 3120, 57 cores x 4 threads) ═════════╗
+║ phi-vpu-worker (card/vpu/worker.S): the dispatcher on CPU 0 reads REQ and SLOTSEQ each poll    ║
+║   ├─ legacy kinds 1..8 on the spare cores' pool: exec.S (K_EXEC), matmul.S, rows.S, kernels.S  ║
+║   ├─ cdma.S: channel 7, the landing page (shared), cdma_submit_phys into a pool page's frame   ║
+║   ├─ resident.S: pool of huge pages (-R), shared table, K_RESIDENT fills, mremap to identity   ║
+║   └─ sched.S: -S slot processes of -C cores (forked): job word, K_PING, K_LOAD and K_FEXEC     ║
+║        through fexec.S (arena, register file in and out, return stub, fault exits), write-back ║
+║ /opt/phi/vpu/phi-vpu-worker and worker.log; card/vpu/build.sh, audited by phi-isa-audit        ║
+╚════════════════════════════════════════════════════════════════════════════════════════════════╝
+```
+
 | path | what |
 | --- | --- |
 | `host/crates/phi512` | the preloaded library: the SIGILL handler, the planner, the dispatcher (and the emulator, as the fallback) |
