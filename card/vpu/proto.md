@@ -20,3 +20,12 @@ descriptor through them.
 `MAGIC` (`VPU_MAGIC`, "VPU_READ") is given as its two 32-bit halves
 because an assembler immediate is at most 32 bits in a store; the worker
 writes the word as a register.
+
+## Protocol v3 (2026-10-13)
+
+The slots: `OFF_SLOTSEQ`, `OFF_SLOTS`, `OFF_SLOTDATA`, `OFF_LOADAREA`,
+`OFF_RESIDENT` and the `SD_*`, `SL_*`, `SR_*`, `SM_*` field offsets, the
+kinds `K_PING` to `K_FLUSH` (9 to 15) and the exits `X_RET` to `X_LIMIT`,
+mirroring [`vpu_fexec.h`](vpu_fexec.md); the legacy words and kinds are
+unchanged. The shared page between the dispatcher and the slot
+processes (`SH_*`) is the card's own and lives in `defs.inc`.

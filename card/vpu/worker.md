@@ -9,7 +9,7 @@ pole after the whole-expert placement). No libc: system calls direct
 `build.sh` and audited for what the card does not run.
 
 ```
-phi-vpu-worker [-v] [-t N] [-s MS] [-i US] [-e N] [-m 0|1] [-d 0|1] [threads]
+phi-vpu-worker [-v] [-t N] [-s MS] [-i US] [-e N] [-m 0|1] [-d 0|1] [-S slots] [-C cores] [-T threads] [threads]
 ```
 
 `threads` 1 to 228 (57): the dispatcher plus the pool. `-v` logs each
@@ -136,3 +136,16 @@ text instead of its path (errno 2), and `poly_dispatch` computing with
 general protection fault in every pool thread at the kernel's first
 coefficient load: the card's `dmesg` names the ip, and the binary keeps
 its symbols during the port).
+
+## Protocol v3: slot processes (2026-10-13)
+
+`-S slots` (0), `-C cores` (4) and `-T threads a core` (1) fork slot
+processes before this process's pool exists ([`sched.md`](sched.md)):
+each takes its cores (`core_base`, `core_count`, which `pool_start` and
+`create_thread` now honour in every process), the wide pool for the
+legacy kinds keeps the cores after theirs (at most four threads a core
+of them), and `main_loop` reads the SLOTSEQ line each poll
+(`slots_poll`), hands a posted slot its job, refreshes `idle_since` when
+it did, and sums the slots' counters into `OFF_STATS` every 64 polls
+(`slots_stats`). The readiness word is re-asserted every 64 polls, not
+every poll. With `-S 0` nothing of this runs.

@@ -216,3 +216,95 @@
 	.set MM2_NB_A, 24
 	.set MM2_D_OFF, 32
 	.set MORE_DESC_BYTES, 128
+
+# Protocol v3 (vpu_fexec.h): the slots. A host thread owns a slot: it
+# writes the slot's request block, then its sequence number into the
+# SLOTSEQ line (one u16 per slot), which the dispatcher reads whole with
+# one 64-byte load per poll. The slot's reply, mail and progress words
+# live in the same 4 KiB block; the slot's bulk data (register blocks,
+# refresh bytes, write-back, the deferred list, the demand landing area)
+# in its 1 MiB of SLOTDATA. Nothing of v3 lies above 128 MiB (the
+# backend's areas). vpu_fexec.md has the picture.
+	.set OFF_SLOTSEQ, 448
+	.set NSLOTS, 32
+	.set OFF_SLOTS, 65536
+	.set SLOT_BYTES, 4096
+	.set OFF_SLOTDATA, 48 * 1048576
+	.set SLOTDATA_BYTES, 1048576
+	.set OFF_LOADAREA, 80 * 1048576
+	.set LOADAREA_BYTES, 16 * 1048576
+	.set OFF_RESIDENT, 96 * 1048576
+	.set RESIDENT_BYTES, 32 * 1048576
+# Inside a slot's 1 MiB of SLOTDATA.
+	.set SD_REGS_IN, 0
+	.set SD_REGS_OUT, 4096
+	.set SD_REFRESH_TAB, 8192
+	.set SD_REFRESH, 16384
+	.set SD_WB_TAB, 272 * 1024
+	.set SD_WB, 288 * 1024
+	.set SD_DEFER, 528 * 1024
+	.set SD_LAND, 784 * 1024
+	.set SD_DEFER_MAX, 2048
+	.set SD_DEFER_BYTES, 128
+# Request kinds of the slots (the legacy kinds 1 to 8 ride the REQ line).
+	.set K_PING, 9
+	.set K_LOAD, 10
+	.set K_UNLOAD, 11
+	.set K_RESIDENT, 12
+	.set K_FEXEC, 13
+	.set K_RESUME, 14
+	.set K_FLUSH, 15
+	.set K_LAST, 15
+# How a function instance left the card.
+	.set X_RET, 0
+	.set X_CALL, 1
+	.set X_ATOMIC, 2
+	.set X_SYSCALL, 3
+	.set X_FAULT, 4
+	.set X_REFUSED, 5
+	.set X_LOOP, 6
+	.set X_DEFER_FULL, 7
+	.set X_LIMIT, 8
+# struct vpu_slot: the request at 0, the reply at SLOT_REPLY, the demand
+# mail at SLOT_MAIL, the progress line at SLOT_PROGRESS.
+	.set SL_SEQ, 0
+	.set SL_KIND, 8
+	.set SL_FLAGS, 12
+	.set SL_FN_ID, 16
+	.set SL_ENTRY, 24
+	.set SL_THREADS, 32
+	.set SL_NSTRIPES, 36
+	.set SL_STRIPES, 40
+	.set SL_STRIPE_BYTES, 16
+	.set SL_MAX_STRIPES, 16
+	.set SL_IND_REG, 296
+	.set SL_BOUND_REG, 300
+	.set SL_STEP, 304
+	.set SL_LOOP_EXIT, 312
+	.set SL_REFRESH_N, 320
+	.set SL_DEFER_CAP, 324
+	.set SL_RESIDENT_HINT, 328
+	.set SL_REQ_BYTES, 336
+	.set SLOT_REPLY, 2048
+	.set SR_SEQ, 0
+	.set SR_STATUS, 8
+	.set SR_EXIT_KIND, 12
+	.set SR_EXIT_RIP, 16
+	.set SR_EXIT_AUX, 24
+	.set SR_RUN_NS, 32
+	.set SR_FETCH_NS, 40
+	.set SR_WB_NS, 48
+	.set SR_TOTAL_NS, 56
+	.set SR_WB_N, 64
+	.set SR_DEFER_N, 68
+	.set SR_THREADS_RAN, 72
+	.set SR_FREE_BYTES, 80
+	.set SR_BYTES, 88
+	.set SLOT_MAIL, 3072
+	.set SM_ADDR, 0
+	.set SM_LEN, 8
+	.set SM_SEQ, 16
+	.set SM_ACK, 24
+	.set SM_STATUS, 32
+	.set SM_BYTES, 40
+	.set SLOT_PROGRESS, 3136

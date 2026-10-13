@@ -10,6 +10,8 @@
 #   scripts/phi-vpu.sh [-c N] log           the worker's output
 #   scripts/phi-vpu.sh [-c N] config        the huge pages reserved and the running worker's arguments
 #   scripts/phi-vpu.sh [-c N] poly [args]   run the host driver; deploys and starts first if needed
+#   scripts/phi-vpu.sh [-c N] ping [args]   the floor of a protocol v3 request (-n COUNT --slots S);
+#                                           the worker must run with slots (PHI_VPU_ARGS="-S 12 -C 4")
 #   scripts/phi-vpu.sh [-c N] dmabench [R]  the card-owned DMA channel against the window copy (card/vpu/dmabench.md);
 #                                           refuses while a worker runs (the channel has one owner)
 #
@@ -147,6 +149,13 @@ case "$cmd" in
             "$0" -c "$PHI_CARD" start
         fi
         exec "$(driver)" --card "$PHI_CARD" poly "$@"
+        ;;
+    ping)
+        # The floor of a protocol v3 request (host/asm/phi-vpu/ping.md):
+        # needs a worker started with slots (PHI_VPU_ARGS="-S 12 -C 4").
+        running || { echo "phi-vpu.sh: no worker on card $PHI_CARD; start one with slots: PHI_VPU_ARGS='-S 12 -C 4' scripts/phi-vpu.sh -c $PHI_CARD start" >&2; exit 1; }
+        [ -x "$root/host/target/release/phi-vpu-ping" ] || "$root/host/asm/phi-vpu/build.sh" > /dev/null
+        exec "$root/host/target/release/phi-vpu-ping" --card "$PHI_CARD" "$@"
         ;;
     dmabench)
         # The bench owns channel 7 alone (card/vpu/cdma.md): a running

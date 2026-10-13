@@ -43,6 +43,8 @@
 
 	.bss
 	.balign 64
+	.globl ctrl, window, stats, nthreads, tls_blocks, slotseq_seen, spin_ns
+	.globl pin_cpu, pool_start
 ctrl:	.skip 8			# the control area, mapped uncached
 window:	.skip 8			# the whole window, mapped; 0 when the mapping failed
 blk_fd:	.skip 4
@@ -59,6 +61,20 @@ map_small:	.skip 4
 use_dma:	.skip 4			# -d: the card's own DMA channel for the pull (cdma.S)
 nthreads:	.skip 4			# pool threads; the dispatcher is one more
 busy_cores:	.skip 4
+# Protocol v3 (sched.S): -S slot processes of -C cores each, -T threads a
+# core; the pool of this process is laid over cores core_base ..
+# core_base + core_count - 1 (every core when there are no slots).
+	.globl nslots, slot_cores, slot_tpc, core_base, core_count, shared, slot_index
+nslots:	.skip 4
+slot_cores:	.skip 4
+slot_tpc:	.skip 4
+core_base:	.skip 4
+core_count:	.skip 4
+slot_index:	.skip 4			# -1 in the dispatcher, the slot's index in a slot process
+shared:	.skip 8			# the page every process shares (SH_*, proto.inc)
+	.balign 64
+slotseq_seen:	.skip 64		# the SLOTSEQ line as last acted on (a line: phi_copy64 wants it aligned)
+slot_polls:	.skip 8
 	.balign 64
 # The generation and, for vpu_pool_map, the whole of its work, on one line:
 # a thread that sees the bump has the job in the same fetch.
@@ -124,6 +140,10 @@ _start:
 	movl $1, map_small(%rip)
 	movl $1, use_dma(%rip)
 	movl $1000, trace_every(%rip)
+	movl $4, slot_cores(%rip)
+	movl $1, slot_tpc(%rip)
+	movl $-1, slot_index(%rip)
+	movl $NCORES, core_count(%rip)
 	movl $57, %r13d			# max_threads (the dispatcher included)
 	# argv: (rsp) argc, 8(rsp) argv[0], ...
 	movq (%rsp), %r12
@@ -192,6 +212,41 @@ _start:
 	movl %eax, use_dma(%rip)
 	jmp 8f
 71:	movq (%rbx), %rsi
+	leaq s_S(%rip), %rdi
+	call str_eq
+	testl %eax, %eax
+	jz 72f
+	call opt_value
+	cmpq $NSLOTS, %rax
+	jbe 711f
+	movl $NSLOTS, %eax
+711:	movl %eax, nslots(%rip)
+	jmp 8f
+72:	movq (%rbx), %rsi
+	leaq s_C(%rip), %rdi
+	call str_eq
+	testl %eax, %eax
+	jz 73f
+	call opt_value
+	testq %rax, %rax
+	jnz 721f
+	movl $1, %eax
+721:	movl %eax, slot_cores(%rip)
+	jmp 8f
+73:	movq (%rbx), %rsi
+	leaq s_T(%rip), %rdi
+	call str_eq
+	testl %eax, %eax
+	jz 74f
+	call opt_value
+	testq %rax, %rax
+	jz 731f
+	cmpq $4, %rax
+	jbe 732f
+731:	movl $1, %eax
+732:	movl %eax, slot_tpc(%rip)
+	jmp 8f
+74:	movq (%rbx), %rsi
 	call parse_u64
 	testq %rdx, %rdx
 	jnz 8f
@@ -354,9 +409,28 @@ _start:
 	call l_end
 	movl $1, %edi
 	call cdma_report
-13:	# the pool: max_threads - 1 threads, core-major
+13:	# Protocol v3: the slot processes, forked before this process's pool
+	# exists (a fork copies no threads), each on its own cores; this
+	# process keeps the cores after theirs for the legacy kinds.
+	cmpl $0, nslots(%rip)
+	je 131f
+	call slots_start
+	movl core_count(%rip), %eax
+	cmpl $1, %eax
+	jl 132f
+	# the wide pool over the remaining cores: at most one thread a core
+	# beyond what max_threads asks
 	leal -1(%r13d), %edi
-	call pool_start
+	movl core_count(%rip), %eax
+	shll $2, %eax
+	cmpl %eax, %edi
+	jle 131f
+	movl %eax, %edi
+	jmp 133f
+132:	xorl %edi, %edi
+	jmp 133f
+131:	leal -1(%r13d), %edi
+133:	call pool_start
 	call vpu_exec_init
 	testl %eax, %eax
 	jnz .Lexec_fail
@@ -430,14 +504,27 @@ main_loop:
 1:	movq OFF_REQ + RQ_SEQ(%rbx), %rax
 	cmpq last_seq(%rip), %rax
 	jne 3f
-	# idle: keep asserting readiness (the host clears the window before its
-	# first request); after the spin window, sleep between polls
-	movabsq $(MAGIC_HI << 32) | MAGIC_LO, %rcx
-	movq %rcx, OFF_READY(%rbx)
+	# the slots' doorbells: one line, one load (sched.S); a slot that posted
+	# gets its job line written and its process woken
+	cmpl $0, nslots(%rip)
+	je 11f
+	call slots_poll			# eax: posts handed over
+	testl %eax, %eax
+	jz 11f
+	call now_ns
+	movq %rax, idle_since(%rip)
+11:	# idle: keep asserting readiness every 64 polls (the host clears the
+	# word before its first request and waits up to 2 s); after the spin
+	# window, sleep between polls
 	incq polls(%rip)
 	testq $63, polls(%rip)
 	jnz 1b
-	call now_ns
+	movabsq $(MAGIC_HI << 32) | MAGIC_LO, %rcx
+	movq %rcx, OFF_READY(%rbx)
+	cmpl $0, nslots(%rip)
+	je 12f
+	call slots_stats			# the slots' counters into OFF_STATS, every 64 polls
+12:	call now_ns
 	subq idle_since(%rip), %rax
 	cmpq spin_ns(%rip), %rax
 	jbe 1b
@@ -714,8 +801,9 @@ pool_start:
 	jge 2f
 	movl %ebx, %eax
 	xorl %edx, %edx
-	movl $NCORES, %ecx
+	movl core_count(%rip), %ecx
 	divl %ecx
+	addl core_base(%rip), %edx
 	leaq core_threads(%rip), %rax
 	incl (%rax,%rdx,4)
 	incl %ebx
@@ -756,8 +844,9 @@ create_thread:
 	movq %r12, TLS_INDEX(%rbx)
 	movl %r12d, %eax
 	xorl %edx, %edx
-	movl $NCORES, %ecx
+	movl core_count(%rip), %ecx
 	divl %ecx
+	addl core_base(%rip), %edx
 	movq %rdx, TLS_CORE(%rbx)
 	movq %rax, TLS_MATE(%rbx)
 	movq $0, TLS_SEEN(%rbx)
@@ -1682,6 +1771,9 @@ s_i:	.asciz "-i"
 s_e:	.asciz "-e"
 s_m:	.asciz "-m"
 s_d:	.asciz "-d"
+s_S:	.asciz "-S"
+s_C:	.asciz "-C"
+s_T:	.asciz "-T"
 s_cdma:	.asciz "cdma: "
 s_cdma_up:	.asciz "channel 7 carries the pull: ring and landing area at "
 s_cdma_win:	.asciz ", the window at "

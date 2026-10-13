@@ -126,3 +126,12 @@ every byte verified). The channel has one owner on a card, so with a
 worker running the verb stops and says to run `stop` first rather than
 stopping it. The bench needs one free huge page; when the card has none
 the reservation is raised by one.
+
+## ping (2026-10-13)
+
+`ping [args]` runs `host/asm/phi-vpu/ping` against the card
+(`host/asm/phi-vpu/ping.md`): the floor of a protocol v3 request, `-n
+COUNT` per slot over `--slots S` slots at once. The worker must have been
+started with slots: `PHI_VPU_ARGS="-S 12 -C 4" scripts/phi-vpu.sh -c N
+start`. `config` prints such a worker as `worker -v -S 12 -C 4 57`, the
+`-v` first as before.

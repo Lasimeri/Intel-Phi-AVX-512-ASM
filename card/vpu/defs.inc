@@ -142,6 +142,34 @@
 	.set BUF_BYTES, 24
 	.set HUGE_BYTES, 2097152
 
+# The page the dispatcher and the slot processes share (sched.S), mapped
+# MAP_SHARED | MAP_ANONYMOUS before the fork: the card's free bytes and
+# the slot count at its head, then a block per slot: the job line the
+# dispatcher writes (kind, flags, then the sequence number last), the
+# done line the slot writes, and the slot's counters on a third line, so
+# no line has two writers.
+	.set SYS_fork, 57
+	.set SH_BYTES, 16384
+	.set SHG_FREE_BYTES, 0
+	.set SHG_NSLOTS, 8
+	.set SH_SLOT0, 256
+	.set SH_SLOT_BYTES, 256
+	.set SH_JOB_SEQ, 0
+	.set SH_JOB_KIND, 8
+	.set SH_JOB_FLAGS, 12
+	.set SH_DONE_SEQ, 64
+	.set SH_PARKED, 72
+	.set SH_REQUESTS, 128
+	.set SH_ERRORS, 136
+	.set SH_BUSY_NS, 144
+	.set SH_RUN_NS, 152
+	.set SH_FETCH_NS, 160
+	.set SH_WB_NS, 168
+	.set SH_LAST_KIND, 176
+	.set SH_LAST_THREADS, 180
+	.set SH_LAST_SEQ, 184
+	.set SH_PID, 192
+
 # The text helpers' line buffer.
 	.set LINECAP, 1024
 

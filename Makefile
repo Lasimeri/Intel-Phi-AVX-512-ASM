@@ -23,6 +23,7 @@ build: ## Build the host workspace (libphi512.so, phi-vpu, the translator, the e
 	cd $(HOST) && cargo build $(PLD) && cargo build --release $(PLD)
 	$(PLD_NOTE)
 	host/asm/ggml-phi/build.sh --install
+	host/asm/phi-vpu/build.sh
 
 test: ## Run host tests that do not need the card
 	cd $(HOST) && cargo test $(PLD)
