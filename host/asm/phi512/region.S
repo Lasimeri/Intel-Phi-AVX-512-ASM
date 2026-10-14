@@ -786,6 +786,16 @@ wu_refresh:
 	movq wu_n(%rip), %r12
 1:	testq %r12, %r12
 	jz 9f
+	# a unit with no changed line: nothing to list (with dirty tracking
+	# most units; walking their 1024 bits each was ~53% of the main thread)
+	xorl %eax, %eax
+	xorl %ecx, %ecx
+12:	orq (%r13,%rcx,8), %rax
+	incl %ecx
+	cmpl $16, %ecx
+	jb 12b
+	testq %rax, %rax
+	jz 8f
 	# the list's state at the unit's start: an overflow inside the unit
 	# takes back what the unit added (see .Lrf_full)
 	movq refresh_n(%rip), %rax
@@ -803,7 +813,15 @@ wu_refresh:
 10:	xorl %r14d, %r14d			# the line (0 to 1023)
 2:	cmpl $1024, %r14d
 	jae 8f
-	btq %r14, (%r13)
+	testl $63, %r14d			# an empty word of 64 lines skipped whole
+	jnz 21f
+	movl %r14d, %eax
+	shrl $6, %eax
+	cmpq $0, (%r13,%rax,8)
+	jne 21f
+	addl $64, %r14d
+	jmp 2b
+21:	btq %r14, (%r13)
 	jnc 6f
 	movq %r14, %r15
 	shlq $6, %r15				# its offset
