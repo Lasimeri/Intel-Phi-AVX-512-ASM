@@ -2828,6 +2828,7 @@ tr_tab:		.skip TR_MAX * TR_BYTES
 tr_dec:		.skip 96			# IN_BYTES (x86dec.inc): x86_decode's out
 	.section .rodata
 s_libggml:	.asciz "libggml-cpu"
+s_libggml_base:	.asciz "libggml-base"
 s_libm:		.asciz "/libm.so"		# the compute library: in libggml-base (the GGUF reader, tensor creation) every plain call a round trip made the load 20x slower (rs7)
 	.text
 	.globl phi512_tramp
@@ -3470,7 +3471,21 @@ callee_promote:
 	movq %rbx, %rdi
 	call cont_obj_ok
 	testl %eax, %eax
+	jnz 10f
+	# libggml-base too, as a callee only (no continuation there: rs7):
+	# ggml_compute_forward_mul_mat calls ggml_is_contiguous and
+	# ggml_row_size through the PLT for every chunk, two round trips each
+	# (lb9's generation: 53,331 of ~67,000 regions, 2026-10-14)
+	movq %rbx, %rdi
+	call obj_at
+	testq %rax, %rax
 	jz 9f
+	leaq OBJ_PATH(%rax), %rdi
+	leaq s_libggml_base(%rip), %rsi
+	call str_has
+	testl %eax, %eax
+	jz 9f
+10:
 	# a seed holding it already?
 	leaq seeds(%rip), %r12
 	xorl %ecx, %ecx
