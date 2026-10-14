@@ -521,9 +521,14 @@ region_run:
 2:	movl cont_rc(%rip), %eax		# 0, or 2: go on in next_seed at next_entry (sigill.S)
 	jmp .Lrg_out
 .Lrg_gp:
-	cmpq $0, verbose(%rip)
-	je 1f
-	# the general registers the card had at the fault, from the file out
+	# always said (2026-10-14: rs20 died here in common_speculative_init with
+	# no rip): the card rip as blob + offset, the address, then the card's
+	# general registers at the fault, from the file out
+	movq 40(%rsp), %rdi			# the exit rip
+	movq %r15, %rsi				# the fault address (below 64 KiB)
+	movq 24(%rsp), %rdx			# the signal word
+	movl $X_FAULT, %ecx
+	call rg_report_exit
 	call l_begin
 	leaq s_rg17(%rip), %rsi
 	call w_str
@@ -675,6 +680,9 @@ wu_ensure:
 	movw $0xffff, WU_DIRTY(%rbx)
 	movq %rbx, %rdi
 	call dt_register				# its writes tracked by the kernel from now (the shadow just taken)
+	movq wu_n(%rip), %rdi
+	decq %rdi
+	call wu_sort_insert			# the by-address index (dt_scan_all scans runs of adjacent units)
 	# the need on card 0: the chunk and the unit's bit, class 1 (written back)
 	xorl %edi, %edi
 	movq %r12, %rsi
@@ -2913,7 +2921,7 @@ dt_pm:		.skip 8
 dt_api:		.skip 24
 dt_reg:		.skip 32
 dt_arg:		.skip 96
-dt_vec:		.skip 16 * 24
+dt_vec:		.skip 512 * 24		# DT_VEC page regions (dt_scan_all)
 stat_dt_skip:	.skip 8			# units the refresh did not read
 	.section .rodata
 s_pagemap:	.asciz "/proc/self/pagemap"
@@ -3044,36 +3052,176 @@ dt_scan:
 9:	popq %rbx
 	ret
 
-# dt_scan_all: every tracked unit's written pages into WU_DIRTY (a failed
-# scan: the unit untracked from then on); an untracked unit all dirty.
+# dt_scan_all: the written pages of every tracked unit into WU_DIRTY, by
+# runs of units adjacent in address (wu_sorted): one PAGEMAP_SCAN a run
+# (in calls of up to DT_VEC regions), not one a unit. With ~2,600 units
+# (llama-server's compute buffer) the per-unit ioctls were ~15% of the
+# main thread in the kernel (rs19 perf). A failed scan untracks the run
+# (full compare); an untracked unit is all dirty.
+	.set DT_VEC, 512
 dt_scan_all:
 	pushq %rbx
+	pushq %rbp
 	pushq %r12
-	leaq wu_tab(%rip), %rbx
-	movq wu_n(%rip), %r12
-1:	testq %r12, %r12
-	jz 9f
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $24, %rsp				# 0 the run's start address, 8 its end, 16 the walk's position
+	xorl %r12d, %r12d			# i: the position in wu_sorted
+1:	cmpq wu_n(%rip), %r12
+	jae 90f
+	movq %r12, %rdi
+	call wu_by_rank
+	movq %rax, %rbx				# the entry
 	cmpb $0, WU_TRK(%rbx)
-	je 3f
-	movq %rbx, %rdi
-	call dt_scan
-	testl %eax, %eax
-	js 2f
-	movw %ax, WU_DIRTY(%rbx)
-	testl %eax, %eax
-	jnz 4f
-	cmpq $0, WU_FHI(%rbx)
-	jne 4f
-	incq stat_dt_skip(%rip)
-	jmp 4f
-2:	movb $0, WU_TRK(%rbx)
-3:	movw $0xffff, WU_DIRTY(%rbx)
-4:	addq $WU_BYTES, %rbx
-	decq %r12
+	jne 2f
+	movw $0xffff, WU_DIRTY(%rbx)
+	incq %r12
 	jmp 1b
-9:	popq %r12
+2:	# the run: tracked units adjacent in address
+	movq WU_ADDR(%rbx), %rax
+	movq %rax, 0(%rsp)
+	movq %r12, %r13				# j
+3:	movw $0, WU_DIRTY(%rbx)
+	incq %r13
+	cmpq wu_n(%rip), %r13
+	jae 4f
+	movq %r13, %rdi
+	call wu_by_rank
+	cmpb $0, WU_TRK(%rax)
+	je 4f
+	movq %r13, %rcx
+	subq %r12, %rcx
+	shlq $16, %rcx
+	addq 0(%rsp), %rcx
+	cmpq WU_ADDR(%rax), %rcx
+	jne 4f
+	movq %rax, %rbx
+	jmp 3b
+4:	movq %r13, %rax
+	subq %r12, %rax
+	shlq $16, %rax
+	addq 0(%rsp), %rax
+	movq %rax, 8(%rsp)			# the run's end
+	movq 0(%rsp), %rax
+	movq %rax, 16(%rsp)
+5:	leaq dt_arg(%rip), %rdx			# one scan of [position, end)
+	movq $96, 0(%rdx)
+	movq $3, 8(%rdx)			# PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC
+	movq 16(%rsp), %rax
+	movq %rax, 16(%rdx)
+	movq 8(%rsp), %rax
+	movq %rax, 24(%rdx)
+	movq $0, 32(%rdx)
+	leaq dt_vec(%rip), %rax
+	movq %rax, 40(%rdx)
+	movq $DT_VEC, 48(%rdx)
+	movq $0, 56(%rdx)
+	movq $0, 64(%rdx)
+	movq $2, 72(%rdx)			# PAGE_IS_WRITTEN
+	movq $0, 80(%rdx)
+	movq $2, 88(%rdx)
+	movq dt_pm(%rip), %rdi
+	movl $PAGEMAP_SCAN_N, %esi
+	movl $SYS_ioctl_n, %eax
+	syscall
+	testq %rax, %rax
+	js 80f
+	movq %rax, dt_vec_big(%rip)		# (the count, for the full-vector test after the loop)
+	movq %rax, %r14				# regions
+	leaq dt_vec(%rip), %r15
+6:	testq %r14, %r14
+	jz 7f
+	movq 0(%r15), %rbp			# a written run of pages
+62:	cmpq 8(%r15), %rbp
+	jae 63f
+	movq %rbp, %rdi				# its unit: the run's first plus (page - start) / 64 KiB
+	subq 0(%rsp), %rdi
+	shrq $16, %rdi
+	addq %r12, %rdi
+	call wu_by_rank
+	movq %rbp, %rcx
+	shrq $12, %rcx
+	andl $15, %ecx
+	movzwl WU_DIRTY(%rax), %edx
+	btsl %ecx, %edx
+	movw %dx, WU_DIRTY(%rax)
+	addq $4096, %rbp
+	jmp 62b
+63:	addq $24, %r15
+	decq %r14
+	jmp 6b
+7:	leaq dt_arg(%rip), %rdx			# a full vector: on from where the walk stopped
+	cmpq $DT_VEC, dt_vec_big(%rip)
+	jb 8f
+	movq 32(%rdx), %rcx
+	cmpq 8(%rsp), %rcx
+	jae 8f
+	movq %rcx, 16(%rsp)
+	jmp 5b
+80:	movq %r12, %r14				# the scan failed: the run untracked, all dirty
+81:	cmpq %r13, %r14
+	jae 8f
+	movq %r14, %rdi
+	call wu_by_rank
+	movb $0, WU_TRK(%rax)
+	movw $0xffff, WU_DIRTY(%rax)
+	incq %r14
+	jmp 81b
+8:	movq %r13, %r12				# the next run
+	jmp 1b
+90:	addq $24, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbp
 	popq %rbx
 	ret
+
+# wu_by_rank(i rdi): the entry of the unit i-th by address (wu_sorted).
+wu_by_rank:
+	leaq wu_sorted(%rip), %rax
+	movzwl (%rax,%rdi,2), %eax
+	imulq $WU_BYTES, %rax, %rax
+	leaq wu_tab(%rip), %rcx
+	addq %rcx, %rax
+	ret
+
+# wu_sort_insert(index rdi): the new unit (wu_tab[index], WU_ADDR set)
+# put into wu_sorted at its place by address (the units below it in the
+# array shifted up; the index holds wu_n - 1 entries before).
+wu_sort_insert:
+	pushq %rbx
+	pushq %r12
+	movq %rdi, %r12				# the new unit's index (= the count of sorted ones)
+	imulq $WU_BYTES, %rdi, %rax
+	leaq wu_tab(%rip), %rcx
+	movq WU_ADDR(%rcx,%rax), %rbx		# its address
+	movq %r12, %rdx				# k: from the end down
+1:	testq %rdx, %rdx
+	jz 2f
+	leaq -1(%rdx), %rdi
+	pushq %rdx
+	call wu_by_rank
+	popq %rdx
+	cmpq WU_ADDR(%rax), %rbx
+	jae 2f
+	leaq wu_sorted(%rip), %rcx		# shift up
+	movw -2(%rcx,%rdx,2), %ax
+	movw %ax, (%rcx,%rdx,2)
+	decq %rdx
+	jmp 1b
+2:	leaq wu_sorted(%rip), %rcx
+	movw %r12w, (%rcx,%rdx,2)
+	popq %r12
+	popq %rbx
+	ret
+	.bss
+	.balign 8
+wu_sorted:	.skip WU_MAX * 2
+dt_vec_big:	.skip 8
+	.text
 
 # callee_promote(callee rdi): a region left the card to call a function
 # the card has no blob for; when it lies in the compute library (through
