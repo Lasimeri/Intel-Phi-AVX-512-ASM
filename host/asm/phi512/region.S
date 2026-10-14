@@ -290,10 +290,15 @@ region_run:
 	call needs_reset
 	popq %rcx
 	movq %r15, %rdi				# the fault address
+	call ro_need				# in an immutable chunk: the chunk as one pool page, no unit
+	testl %eax, %eax
+	jnz 42f
+	movq %r15, %rdi
 	xorl %esi, %esi
 	call wu_ensure
 	testl %eax, %eax
 	jnz .Lrg_step
+42:
 	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
 	movq region_floor(%rip), %rsi
 	call wu_stack_floors			# a stack unit the fault brought in floored before any write-back
@@ -1844,7 +1849,10 @@ s_hb3:	.asciz " regions ("
 s_hb4:	.asciz "/s), "
 s_hb5:	.asciz "% of the time in regions, "
 s_hb6:	.asciz " fault(s), "
-s_hb7:	.asciz " write-back line(s); last region in "
+s_hb7:	.asciz " write-back line(s), "
+s_hb8:	.asciz " chunk fill(s) ("
+s_hb9:	.asciz " read-only), "
+s_hb10:	.asciz " eviction(s); last region in "
 	.text
 	.globl heartbeat
 heartbeat:
@@ -1913,6 +1921,18 @@ heartbeat:
 	call w_dec
 	leaq s_hb7(%rip), %rsi
 	call w_str
+	movq stat_resident(%rip), %rdi
+	call w_dec
+	leaq s_hb8(%rip), %rsi
+	call w_str
+	movq stat_ro_faults(%rip), %rdi
+	call w_dec
+	leaq s_hb9(%rip), %rsi
+	call w_str
+	movq stat_evictions(%rip), %rdi
+	call w_dec
+	leaq s_hb10(%rip), %rsi
+	call w_str
 	testq %r12, %r12
 	jz 1f
 	movq %r12, %rsi
@@ -1929,4 +1949,48 @@ heartbeat:
 	popq %r13
 	popq %r12
 	popq %rbx
+	ret
+
+# ro_need(address rdi): when the 2 MiB chunk holding the address is
+# immutable in the program (elf.S chunk_immutable: inside one readable,
+# not writable mapping; the mmapped model's weights), the whole chunk is
+# queued for card 0 as class 0 and eax is 1: one pool page filled once by
+# DMA, no shadow, no refresh, no write-back; when the card's pool is full
+# the host names a victim (card.S c0_victim), so a region runs on the card
+# whatever part of the model it reads (the user, 2026-10-14: the cards run
+# every region, the weights they cannot hold are streamed). Else eax 0:
+# the 64 KiB unit path (wu_ensure). A chunk card 0 already holds by
+# writable units (classified before) stays on that path.
+	.bss
+	.balign 8
+	.globl stat_ro_faults
+stat_ro_faults:	.skip 8			# faults taken as immutable chunks
+	.text
+	.globl ro_need
+ro_need:
+	pushq %rbx
+	movq %rdi, %rbx
+	andq $-CHUNK, %rbx
+	movq %rbx, %rdi
+	call chunk_immutable
+	testl %eax, %eax
+	jz 9f
+	leaq cards(%rip), %rdi			# card 0's table: a chunk held as units stays units
+	leaq CD_TAB(%rdi), %rdi
+	movq %rbx, %rsi
+	call tab_find
+	testq %rax, %rax
+	jz 1f
+	cmpl $0, RE_CLASS(%rax)
+	jne 8f
+1:	xorl %edi, %edi
+	movq %rbx, %rsi
+	movl $-1, %edx				# every unit of the chunk
+	xorl %ecx, %ecx				# class 0
+	call need_add
+	incq stat_ro_faults(%rip)
+	movl $1, %eax
+	jmp 9f
+8:	xorl %eax, %eax
+9:	popq %rbx
 	ret

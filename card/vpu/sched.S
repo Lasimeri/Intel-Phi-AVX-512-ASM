@@ -226,7 +226,11 @@ slots_poll:
 	movl $-2, SH_RES_IDX(%r13)		# class 1: the slot maps the units by itself and fills them
 	movq $-1, SH_PULL_SEQ(%r13)
 	jmp 51f
-53:	movq slreq + SL_FN_ID(%rip), %rdi
+53:	movq slreq + SL_VICTIM(%rip), %rdi
+	testq %rdi, %rdi
+	jz 54f
+	call res_drop				# the host's eviction first: the victim's page freed for this chunk
+54:	movq slreq + SL_FN_ID(%rip), %rdi
 	movl slreq + SL_THREADS(%rip), %esi
 	call res_assign
 	movl %eax, SH_RES_IDX(%r13)
@@ -532,6 +536,9 @@ sched_main:
 	jmp 1f
 16:	call res_flush				# K_FLUSH: the session's residency dropped
 	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
+	movq res_n(%rip), %rax			# the pool's bytes: the host pins up to them less its ring (card.S c0_victim)
+	shlq $21, %rax
+	movq %rax, reply_buf + SR_FREE_BYTES(%rip)
 	jmp 1f
 15:	# K_PUSH: the dispatcher submitted the engine's copy of the bytes at
 	# fn_id (resident here) into the staging slot; waited for here

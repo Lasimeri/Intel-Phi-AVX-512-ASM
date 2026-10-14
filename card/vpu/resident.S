@@ -40,6 +40,7 @@ res_n:	.skip 8				# pool pages (0: no pool)
 res_pool:	.skip 8			# the pool's base in this process
 res_table:	.skip 8			# the shared table
 res_mapped:	.skip RES_MAX / 8		# this process: which pool pages sit at their program address
+res_at:		.skip RES_MAX * 8		# this process: the program address each placed page sits at (the table's may have moved on: an eviction)
 pagemap_fd:	.skip 8
 pm_buf:	.skip 64
 
@@ -297,6 +298,7 @@ res_map_all:
 	pushq %r12
 	pushq %r13
 	pushq %r14
+	call res_unplace_stale			# pages the host evicted moved off their old addresses first
 	movq $0, res_map_failed(%rip)
 	xorl %ebx, %ebx				# index
 	xorl %r13d, %r13d			# moved
@@ -352,6 +354,12 @@ res_map_all:
 	jne 11f
 4:	leaq res_mapped(%rip), %rax
 	btsq %rbx, (%rax)
+	movq res_table(%rip), %rcx
+	movq %rbx, %rdx
+	shlq $5, %rdx
+	movq RT_ADDR(%rcx,%rdx), %rax
+	leaq res_at(%rip), %rcx
+	movq %rax, (%rcx,%rbx,8)		# where it sits now
 	incl %r13d
 	incq %rbx
 	decl %r14d
@@ -367,6 +375,82 @@ res_map_all:
 	je 10f
 9:	movl $-1, %eax
 10:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+
+# res_drop(rdi program address): the pool page holding that chunk freed
+# (address 0, state free; the frame stays): the host's eviction, named by
+# a K_RESIDENT's SL_VICTIM before the chunk it makes room for (host
+# card.S c0_victim). The slot process still has the page at the old
+# address: res_map_all moves it off (res_unplace_stale) before the next
+# run. The dispatcher's; rax, rcx, rdx only. A read-only chunk's lines
+# are never dirty in a core, and DMA writes reach clean cached lines
+# (the stack's docs/results/2026-09-16-dma.md), so the page is refilled
+# by DMA with no eviction from the cores' caches.
+	.globl res_drop
+res_drop:
+	movq res_table(%rip), %rcx
+	xorl %edx, %edx
+1:	cmpq res_n(%rip), %rdx
+	jae 9f
+	movq %rdx, %rax
+	shlq $5, %rax
+	cmpq RT_ADDR(%rcx,%rax), %rdi
+	je 2f
+	incq %rdx
+	jmp 1b
+2:	movq $0, RT_ADDR(%rcx,%rax)
+	movq $0, RT_STATE(%rcx,%rax)		# state and class
+	movq $0, RT_SEQ(%rcx,%rax)
+9:	ret
+
+# res_unplace_stale: every pool page this process placed whose table
+# entry no longer names that address (evicted: res_drop, then maybe a new
+# chunk filled into it) moved back to its pool address, and the
+# reservation restored at the old one, so the program's old address faults
+# again instead of reading the page's new chunk. The slot process's, from
+# res_map_all. eax the pages moved (each a TLB shootdown on the card).
+	.globl res_unplace_stale
+res_unplace_stale:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	xorl %ebx, %ebx
+	xorl %r13d, %r13d
+1:	cmpq res_n(%rip), %rbx
+	jae 8f
+	leaq res_mapped(%rip), %rax
+	btq %rbx, (%rax)
+	jnc 7f
+	leaq res_at(%rip), %rax
+	movq (%rax,%rbx,8), %r12		# where this process placed it
+	movq res_table(%rip), %rcx
+	movq %rbx, %rdx
+	shlq $5, %rdx
+	cmpl $RS_RESIDENT, RT_STATE(%rcx,%rdx)
+	jne 2f
+	cmpq RT_ADDR(%rcx,%rdx), %r12
+	je 7f
+2:	movq %r12, %rdi
+	movl $HUGE_BYTES, %esi
+	movl $HUGE_BYTES, %edx
+	movl $MREMAP_MAYMOVE | MREMAP_FIXED, %r10d
+	movq res_pool(%rip), %r8
+	movq %rbx, %rax
+	shlq $21, %rax
+	addq %rax, %r8				# back to its pool address
+	SYS SYS_mremap
+	movq %r12, %rdi
+	call resv_restore
+	leaq res_mapped(%rip), %rax
+	btrq %rbx, (%rax)
+	incl %r13d
+7:	incq %rbx
+	jmp 1b
+8:	movl %r13d, %eax
 	popq %r13
 	popq %r12
 	popq %rbx
@@ -390,10 +474,8 @@ res_flush:
 	leaq res_mapped(%rip), %rax
 	btq %rbx, (%rax)
 	jnc 7f
-	movq res_table(%rip), %rcx
-	movq %rbx, %rdx
-	shlq $5, %rdx
-	movq RT_ADDR(%rcx,%rdx), %rdi		# from the program address
+	leaq res_at(%rip), %rax
+	movq (%rax,%rbx,8), %rdi		# from where this process placed it
 	movl $HUGE_BYTES, %esi
 	movl $HUGE_BYTES, %edx
 	movl $MREMAP_MAYMOVE | MREMAP_FIXED, %r10d
@@ -402,10 +484,8 @@ res_flush:
 	shlq $21, %rax
 	addq %rax, %r8				# back to its pool address
 	SYS SYS_mremap
-	movq res_table(%rip), %rcx
-	movq %rbx, %rdx
-	shlq $5, %rdx
-	movq RT_ADDR(%rcx,%rdx), %rdi
+	leaq res_at(%rip), %rax
+	movq (%rax,%rbx,8), %rdi
 	call resv_restore
 	leaq res_mapped(%rip), %rax
 	btrq %rbx, (%rax)

@@ -307,7 +307,8 @@
 	.set SL_FILL_OFF, 336
 	.set SL_FILL_LEN, 344
 	.set SL_CANARY, 352			# K_FEXEC: the program's stack-protector canary, put at fs:0x28 of every thread
-	.set SL_REQ_BYTES, 360
+	.set SL_VICTIM, 360			# K_RESIDENT: a class-0 chunk to drop first (its pool page freed for this one), 0 none
+	.set SL_REQ_BYTES, 368
 	.set SLOT_REPLY, 2048
 	.set SR_SEQ, 0
 	.set SR_STATUS, 8

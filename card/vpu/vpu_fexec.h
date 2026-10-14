@@ -96,6 +96,7 @@ struct vpu_slot_req {
     uint64_t fill_off;         /* K_RESIDENT: the range of the chunk to fill from the staging slot */
     uint64_t fill_len;         /* (0: the page only, nothing copied) */
     uint64_t canary;           /* K_FEXEC: the program's stack-protector canary (fs:0x28), set in every thread's TLS */
+    uint64_t victim;           /* K_RESIDENT: a class-0 chunk to drop first (its pool page freed), 0 none */
 };
 
 /* The reply, at VPU_SLOT_REPLY: the fields, then seq last. */
@@ -130,7 +131,7 @@ struct vpu_slot_mail {
 #define VPU_SLOT_MAIL     3072
 #define VPU_SLOT_PROGRESS 3136   /* uint64_t defer_n, card-written while an instance runs */
 
-_Static_assert(sizeof(struct vpu_slot_req) == 360, "slot request layout is shared with the card and the preload");
+_Static_assert(sizeof(struct vpu_slot_req) == 368, "slot request layout is shared with the card and the preload");
 _Static_assert(sizeof(struct vpu_slot_reply) == 88, "slot reply layout is shared");
 _Static_assert(sizeof(struct vpu_slot_mail) == 40, "slot mail layout is shared");
 

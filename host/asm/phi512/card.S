@@ -186,6 +186,18 @@ card_add:
 	call card_wait
 	testl %eax, %eax
 	jnz .Lca_flush
+	movq CD_SLOTP(%rbx), %rcx		# the pool's bytes (0 from an older worker: no eviction)
+	movq SLOT_REPLY + SR_FREE_BYTES(%rcx), %rax
+	shrq $21, %rax
+	movq CD_INDEX(%rbx), %rdx
+	leaq c0_pool(%rip), %rcx
+	movq %rax, (%rcx,%rdx,8)
+	leaq c0_n(%rip), %rcx
+	movq $0, (%rcx,%rdx,8)
+	leaq c0_rn(%rip), %rcx
+	movq $0, (%rcx,%rdx,8)
+	leaq c0_head(%rip), %rcx
+	movq $0, (%rcx,%rdx,8)
 	movq ncards(%rip), %rax
 	imulq $RES_TAB_CAP * RES_ENTRY, %rax, %rax
 	leaq res_entries(%rip), %rcx
@@ -563,9 +575,16 @@ card_resident_post:
 	pushq %r9
 	movq %rbx, %rdi
 	call card_clear_request
-	popq %r9
+	xorl %eax, %eax
+	testl %r14d, %r14d
+	jnz 22f
+	movq %rbx, %rdi				# class 0: a pool page, maybe a victim for it
+	movq %r12, %rsi
+	call c0_victim
+22:	popq %r9
 	popq %r8
 	movq CD_SLOTP(%rbx), %rcx
+	movq %rax, SL_VICTIM(%rcx)
 	movq %r12, SL_FN_ID(%rcx)
 	movq %r15, SL_ENTRY(%rcx)
 	movl %r14d, SL_THREADS(%rcx)
@@ -742,5 +761,84 @@ card_push_done:
 	addq %rax, stat_push_ns(%rip)
 	xorl %eax, %eax
 9:	popq %r12
+	popq %rbx
+	ret
+
+# c0_victim(card rdi, chunk rsi): room on the card's pool for a class-0
+# chunk (region.S ro_need, the seeds' read operands). A chunk the card's
+# table holds already (more units of it) takes no page: rax 0. Otherwise,
+# while fewer than pool - C0_RING class-0 chunks are on the card, the
+# chunk is pinned for the session (rax 0); after that it enters a FIFO
+# ring of C0_RING pages, and once the ring is full its oldest chunk is the
+# victim: rax, removed from the card's table, named in the K_RESIDENT
+# (SL_VICTIM) so the card frees its page first. Pinning plus a small ring,
+# not LRU: a token reads the model's weights in the same order every time,
+# and LRU over a cyclic stream larger than the pool keeps nothing; the
+# pinned part hits on every token. A pool size of 0 (an older worker)
+# evicts nothing.
+	.set C0_RING, 16
+	.set C0_RING_SHIFT, 4
+	.bss
+	.balign 8
+	.globl stat_evictions
+c0_pool:	.skip MAX_CARDS * 8		# the card's pool pages (K_FLUSH's reply)
+c0_n:		.skip MAX_CARDS * 8		# class-0 chunks pinned
+c0_rn:		.skip MAX_CARDS * 8		# chunks in the ring
+c0_head:	.skip MAX_CARDS * 8		# the ring's oldest
+c0_ring:	.skip MAX_CARDS * C0_RING * 8
+stat_evictions:	.skip 8
+	.text
+c0_victim:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	leaq CD_TAB(%rbx), %rdi
+	call tab_find
+	testq %rax, %rax
+	jnz 8f
+	movq CD_INDEX(%rbx), %r13
+	leaq c0_pool(%rip), %rdx
+	movq (%rdx,%r13,8), %rdx
+	testq %rdx, %rdx
+	jz 8f					# the pool's size unknown: no eviction
+	subq $C0_RING, %rdx			# the pinned part
+	jbe 2f
+	leaq c0_n(%rip), %rcx
+	cmpq %rdx, (%rcx,%r13,8)
+	jae 2f
+	incq (%rcx,%r13,8)			# pinned
+	jmp 8f
+2:	movq %r13, %rdx
+	shlq $C0_RING_SHIFT + 3, %rdx
+	leaq c0_ring(%rip), %r8
+	addq %rdx, %r8				# this card's ring
+	leaq c0_rn(%rip), %rcx
+	movq (%rcx,%r13,8), %rax
+	cmpq $C0_RING, %rax
+	jae 3f
+	movq %r12, (%r8,%rax,8)			# a free place in the ring
+	incq (%rcx,%r13,8)
+	jmp 8f
+3:	leaq c0_head(%rip), %rcx
+	movq (%rcx,%r13,8), %rdx
+	movq (%r8,%rdx,8), %rax			# the oldest: the victim
+	movq %r12, (%r8,%rdx,8)
+	incq %rdx
+	andq $C0_RING - 1, %rdx
+	movq %rdx, (%rcx,%r13,8)
+	pushq %rax
+	pushq %rax
+	leaq CD_TAB(%rbx), %rdi
+	movq %rax, %rsi
+	call tab_remove
+	popq %rax
+	popq %rax
+	incq stat_evictions(%rip)
+	jmp 9f
+8:	xorl %eax, %eax
+9:	popq %r13
+	popq %r12
 	popq %rbx
 	ret

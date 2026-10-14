@@ -163,8 +163,9 @@ int main(void)
 	check("VPU_X_LOOP", VPU_X_LOOP, 6);
 	check("VPU_X_LIMIT", VPU_X_LIMIT, 8);
 	check("VPU_X_HOST", VPU_X_HOST, 10);
-	check("sizeof(vpu_slot_req)", sizeof(struct vpu_slot_req), 360);
+	check("sizeof(vpu_slot_req)", sizeof(struct vpu_slot_req), 368);
 	check("slot_req.canary", offsetof(struct vpu_slot_req, canary), 352);
+	check("slot_req.victim", offsetof(struct vpu_slot_req, victim), 360);
 	check("fill_off", offsetof(struct vpu_slot_req, fill_off), 336);
 	check("fill_len", offsetof(struct vpu_slot_req, fill_len), 344);
 	check("slot_req.seq", offsetof(struct vpu_slot_req, seq), 0);

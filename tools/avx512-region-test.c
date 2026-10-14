@@ -13,9 +13,13 @@
  *   PHI512_CARDS=0 LD_PRELOAD=libphi512-asm.so ./avx512-region-test
  *
  * See avx512-region-test.md. */
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int fails;
 static float side[16] __attribute__((aligned(64)));
@@ -144,6 +148,68 @@ static float kernel4_ref(const float *x)
     return take_big(b);
 }
 
+
+/* kernel5: a region that reads more of a read-only file mapping than the
+ * card's pool holds (the model's weights are such a mapping, 2026-10-14):
+ * each 2 MiB chunk wholly inside the mapping goes to the card as one pool
+ * page, filled once, and once the pool is full the oldest pages of its
+ * ring are evicted; the second call re-reads chunks evicted in the first,
+ * which must fault again on the card instead of reading what their page
+ * holds now. The file (RO_FILE, RO_BYTES, a distinct word everywhere) is
+ * written in the current directory when missing. */
+#define RO_FILE "avx512-region-test.ro"
+#define RO_BYTES (384u << 20)
+#define RO_SUMS 192
+
+__attribute__((noinline))
+static void kernel5(const uint32_t *m, size_t words, uint32_t *sums)
+{
+    const size_t per = RO_BYTES / 4 / RO_SUMS;	/* a constant trip count: vectorised at -O2 */
+    (void)words;
+    for (int k = 0; k < RO_SUMS; k++) {
+        uint32_t s = 0;
+        for (size_t i = 0; i < per; i++) s += m[k * per + i] ^ (uint32_t)i;
+        sums[k] = s;
+    }
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static void kernel5_ref(const uint32_t *m, size_t words, uint32_t *sums)
+{
+    const size_t per = RO_BYTES / 4 / RO_SUMS;
+    (void)words;
+    for (int k = 0; k < RO_SUMS; k++) {
+        uint32_t s = 0;
+        for (size_t i = 0; i < per; i++) s += m[k * per + i] ^ (uint32_t)i;
+        sums[k] = s;
+    }
+}
+
+/* the pattern file: word w = w * 2654435761 ^ (w >> 19), so every chunk
+ * differs from every other; NULL when it cannot be made or mapped */
+__attribute__((noinline, target("no-avx512f")))
+static const uint32_t *ro_map(void)
+{
+    int fd = open(RO_FILE, O_RDONLY);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) || (uint64_t)st.st_size != RO_BYTES) {
+        if (fd >= 0) close(fd);
+        static uint32_t buf[1 << 18];
+        FILE *f = fopen(RO_FILE, "wb");
+        if (!f) return NULL;
+        for (uint64_t w = 0; w < RO_BYTES / 4; ) {
+            for (int i = 0; i < (1 << 18); i++, w++) buf[i] = (uint32_t)(w * 2654435761u) ^ (uint32_t)(w >> 19);
+            if (fwrite(buf, sizeof buf, 1, f) != 1) { fclose(f); return NULL; }
+        }
+        if (fclose(f)) return NULL;
+        fd = open(RO_FILE, O_RDONLY);
+        if (fd < 0) return NULL;
+    }
+    void *p = mmap(NULL, RO_BYTES, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    return p == MAP_FAILED ? NULL : p;
+}
+
 /* main itself has no AVX-512 code: the inputs come from a scalar helper
  * (gcc would vectorise the loop in main with forms the kernels never
  * use). */
@@ -179,6 +245,21 @@ int main(void)
     float r4 = kernel4(x), want4 = kernel4_ref(x);
     if (r4 != want4) { printf("FAIL kernel4: got %g want %g\n", r4, want4); fails++; }
     else printf("ok   kernel4 (stack arguments written below the frame by the region: %g)\n", r4);
+    const uint32_t *m = ro_map();
+    if (!m) { printf("FAIL kernel5: %s could not be written or mapped\n", RO_FILE); fails++; }
+    else {
+        static uint32_t s1[RO_SUMS], s2[RO_SUMS], sr[RO_SUMS];
+        kernel5(m, RO_BYTES / 4, s1);
+        kernel5(m, RO_BYTES / 4, s2);
+        kernel5_ref(m, RO_BYTES / 4, sr);
+        int bad1 = 0, bad2 = 0, first = -1;
+        for (int k = 0; k < RO_SUMS; k++) {
+            if (s1[k] != sr[k]) { bad1++; if (first < 0) first = k; }
+            if (s2[k] != sr[k]) { bad2++; if (first < 0) first = k; }
+        }
+        if (bad1 || bad2) { printf("FAIL kernel5: %d and %d of %d sums wrong (first at %d: %08x %08x want %08x)\n", bad1, bad2, RO_SUMS, first, s1[first], s2[first], sr[first]); fails++; }
+        else printf("ok   kernel5 (%u MiB of a read-only file mapping read twice, %d sums)\n", RO_BYTES >> 20, RO_SUMS);
+    }
     printf("%s\n", fails ? "FAIL" : "PASS: every region came back right");
     return fails != 0;
 }

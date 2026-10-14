@@ -747,3 +747,42 @@ maps_ensure:
 	jne 1f
 	call maps_load
 1:	ret
+
+# chunk_immutable(chunk rdi, 2 MiB aligned): eax 1 when the whole chunk
+# lies inside one mapping the program has readable and not writable (the
+# mmapped model, a DSO's text and constants), else 0. Such a chunk goes to
+# a card as one pool page filled once (region.S ro_need): nothing in the
+# program can change it, so it needs no shadow, no refresh and no
+# write-back. A chunk at a mapping's edge (something else, maybe
+# writable, in its other part) or across two mappings is not one: the
+# 64 KiB unit path takes it, as before. rcx, rdx, rsi, r8 clobbered.
+	.text
+	.globl chunk_immutable
+chunk_immutable:
+	cmpq $0, maps_valid(%rip)
+	jne 1f
+	pushq %rdi
+	call maps_load
+	popq %rdi
+1:	leaq maps_tab(%rip), %rcx
+	movq maps_n(%rip), %r8
+	leaq CHUNK(%rdi), %rsi			# the chunk's end
+2:	testq %r8, %r8
+	jz 9f
+	cmpq 0(%rcx), %rdi
+	jb 3f
+	cmpq 8(%rcx), %rdi
+	jae 3f
+	cmpq 8(%rcx), %rsi			# the mapping holding the chunk's start: the end inside it too
+	ja 9f
+	movq 16(%rcx), %rax
+	andl $MAPF_R | MAPF_W, %eax
+	cmpl $MAPF_R, %eax
+	jne 9f
+	movl $1, %eax
+	ret
+3:	addq $MAPT_BYTES, %rcx
+	decq %r8
+	jmp 2b
+9:	xorl %eax, %eax
+	ret
