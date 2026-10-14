@@ -210,6 +210,82 @@ static const uint32_t *ro_map(void)
     return p == MAP_FAILED ? NULL : p;
 }
 
+
+/* kernel6: calls between AVX-512 functions stay on the card (in-card
+ * calls, 2026-10-14): dot6 through a pointer and directly, scale6
+ * directly; scale6 calls a plain function in its middle, an exit from
+ * inside a callee the card entered, so the program's stack has to hold
+ * the host's return addresses there. The first calls leave the card
+ * (dot6 not translated yet); later ones find its blob in the card's
+ * table. Inputs in quarters keep every sum exact in any order. */
+typedef float (*dot_t)(const float *, const float *);
+
+__attribute__((noinline))
+static float dot6(const float *a, const float *b)
+{
+    float s = 0;
+    for (int i = 0; i < 64; i++) s += a[i] * b[i];
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float dot6_ref(const float *a, const float *b)
+{
+    float s = 0;
+    for (int i = 0; i < 64; i++) s += a[i] * b[i];
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float plain6(float *a)
+{
+    float s = 0;
+    for (int i = 0; i < 64; i++) { s += a[i]; a[i] -= 1.0f; }
+    return s;
+}
+
+__attribute__((noinline))
+static float scale6(float *a, float k)
+{
+    for (int i = 0; i < 64; i++) a[i] *= k;
+    float s = plain6(a);
+    for (int i = 0; i < 64; i++) a[i] += s * 0.0625f;
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float scale6_ref(float *a, float k)
+{
+    for (int i = 0; i < 64; i++) a[i] *= k;
+    float s = plain6(a);
+    for (int i = 0; i < 64; i++) a[i] += s * 0.0625f;
+    return s;
+}
+
+__attribute__((noinline))
+static float kernel6(const float *x, float *y, int reps, dot_t f)
+{
+    float acc = 0;
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i < 64; i++) y[i] = y[i] * 0.5f + x[i];	/* AVX-512 in the caller: its region calls from the blob */
+        acc += f(x, y) + dot6(x + r, y);
+    }
+    acc += scale6(y, 0.5f);
+    return acc + dot6(y, x);
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float kernel6_ref(const float *x, float *y, int reps, dot_t f)
+{
+    float acc = 0;
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i < 64; i++) y[i] = y[i] * 0.5f + x[i];	/* AVX-512 in the caller: its region calls from the blob */
+        acc += f(x, y) + dot6_ref(x + r, y);
+    }
+    acc += scale6_ref(y, 0.5f);
+    return acc + dot6_ref(y, x);
+}
+
 /* main itself has no AVX-512 code: the inputs come from a scalar helper
  * (gcc would vectorise the loop in main with forms the kernels never
  * use). */
@@ -260,6 +336,12 @@ int main(void)
         if (bad1 || bad2) { printf("FAIL kernel5: %d and %d of %d sums wrong (first at %d: %08x %08x want %08x)\n", bad1, bad2, RO_SUMS, first, s1[first], s2[first], sr[first]); fails++; }
         else printf("ok   kernel5 (%u MiB of a read-only file mapping read twice, %d sums)\n", RO_BYTES >> 20, RO_SUMS);
     }
+    static float y6[256] __attribute__((aligned(64))), y6r[256] __attribute__((aligned(64)));
+    memcpy(y6, x, sizeof y6);
+    memcpy(y6r, x, sizeof y6r);
+    float r6 = kernel6(x, y6, 8, dot6), w6 = kernel6_ref(x, y6r, 8, dot6_ref);
+    if (r6 != w6 || memcmp(y6, y6r, sizeof y6)) { printf("FAIL kernel6: got %g want %g, arrays %s\n", r6, w6, memcmp(y6, y6r, sizeof y6) ? "differ" : "equal"); fails++; }
+    else printf("ok   kernel6 (calls between AVX-512 functions, one with an exit inside: %g)\n", r6);
     printf("%s\n", fails ? "FAIL" : "PASS: every region came back right");
     return fails != 0;
 }

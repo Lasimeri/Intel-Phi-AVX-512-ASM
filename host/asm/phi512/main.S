@@ -11,12 +11,15 @@
 	.bss
 	.balign 64
 sa:	.skip SA_BYTES
+	.globl incall_off
+incall_off:	.skip 8			# 1: blobs leave the card at every call (PHI512_INCALL=0)
 
 	.section .rodata
 s_env_verbose:	.asciz "PHI512_VERBOSE"
 s_env_disable:	.asciz "PHI512_DISABLE"
 s_env_handblobs: .asciz "PHI512_HANDBLOBS"
 s_env_heapcheck: .asciz "PHI512_HEAPCHECK"
+s_env_incall:	.asciz "PHI512_INCALL"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -64,6 +67,13 @@ phi512_init:
 	call env_set
 	movl %eax, %eax
 	movq %rax, heapcheck(%rip)
+	leaq s_env_incall(%rip), %rdi		# PHI512_INCALL=0: every call leaves the card (blob.S .Lincall)
+	movl $1, %esi
+	call env_u64
+	xorl %ecx, %ecx
+	testq %rax, %rax
+	sete %cl
+	movq %rcx, incall_off(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f

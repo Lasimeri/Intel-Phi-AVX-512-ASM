@@ -41,3 +41,17 @@ arguments fall inside the region, below the frame's rsp minus 128. PASS
 with the alternate signal stack and the lowered floor; with the floor's
 slack set to 0 it fails (2.65e8 for 2258) and the floor warning fires
 twice.
+
+## kernel5 and kernel6 (2026-10-14)
+
+- kernel5: 384 MiB of a read-only file mapping (`avx512-region-test.ro`,
+  written in the current directory when missing) read twice: every 2 MiB
+  chunk wholly inside it goes to the card as one pool page, evicted from
+  a 16-page ring once the pool is full; the second read re-faults the
+  evicted chunks. Bit-exact against the scalar reference at `-R 128`
+  (a 256 MiB pool).
+- kernel6: AVX-512 functions calling each other directly and through a
+  pointer, one with a plain function called in its middle (an exit from
+  inside a callee the card entered). With in-card calls kernel6's work
+  is 6 region posts (kernel6 3, dot6 1, scale6 2) against 38 with
+  `PHI512_INCALL=0` (19, 17, 2), same results.

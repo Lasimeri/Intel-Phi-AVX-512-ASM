@@ -54,6 +54,8 @@ extern uint64_t blob_build(struct blob *bl, struct fn *fn, const void *bytes, co
  * X_HOST: the host runs it; 5 X_REFUSED), the reason. */
 extern uint64_t blob_lazy_n;
 extern struct lazy { uint32_t off, kind; const char *why; } blob_lazy[];
+/* main.S sets it from PHI512_INCALL; 0 here: blobs as the preload builds them by default (in-card calls) */
+uint64_t incall_off = 0;
 extern uint64_t x86_decode(const void *bytes, uint64_t avail, void *out, uint64_t addr);
 
 #define SCRATCH_TPOFF 0x1000

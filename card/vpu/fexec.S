@@ -109,6 +109,11 @@ fx_flags:	.skip 8			# the request's flags (FXF_*)
 fx_ind_reg:	.skip 8
 fx_bound_reg:	.skip 8
 fx_tab:	.skip FX_TAB_MAX * FT_BYTES
+	.set FN_CAP, 4096			# in-card calls: host function address -> blob entry, open addressing
+fn_htab:	.skip FN_CAP * 16
+fn_n:		.skip 8
+	.balign 4096
+fx_shadow:	.skip (MAX_POOL + 1) * 4096	# per thread: 255 frames of {host return, blob return}
 fx_ntab:	.skip 8
 fx_arena:	.skip 8
 fx_arena_used:	.skip 8
@@ -185,8 +190,16 @@ fexec_init:
 	# the exit stub's address in every thread's TLS block
 	leaq tls_blocks(%rip), %rdi
 	leaq fx_exit_jmp(%rip), %rax
+	leaq fx_shadow(%rip), %rdx
+	leaq fx_incall(%rip), %r8
+	leaq fx_inret(%rip), %r9
 	movl $MAX_POOL + 1, %ecx
 1:	movq %rax, TE_EXIT(%rdi)
+	movq %r8, FX_SCRATCH_TPOFF + FX_S_INCALL(%rdi)	# in-card calls: the routines and this thread's shadow stack
+	movq %r9, FX_SCRATCH_TPOFF + FX_S_INRET(%rdi)
+	movq %rdx, FX_SCRATCH_TPOFF + FX_S_RSHB(%rdi)
+	movq %rdx, FX_SCRATCH_TPOFF + FX_S_RSH(%rdi)
+	addq $4096, %rdx
 	addq $TLS_BYTES, %rdi
 	decl %ecx
 	jnz 1b
@@ -272,7 +285,13 @@ fexec_load:
 	movq %rax, %r14				# the address
 	call phi_copy64
 	movq %r14, SR_EXIT_AUX(%r13)
-	xorl %eax, %eax
+	movq SL_FILL_OFF(%rbx), %rdi		# the function's host address and entry offset (0: a hand blob)
+	testq %rdi, %rdi
+	jz 4f
+	movq %r14, %rsi
+	addq SL_FILL_LEN(%rbx), %rsi
+	call fn_insert
+4:	xorl %eax, %eax
 	jmp 9f
 .Lfl_request:
 	movl $E_REQUEST, %eax
@@ -493,6 +512,8 @@ fx_enter:
 	pushq %r13
 	pushq %r14
 	pushq %r15
+	movq %fs:FX_SCRATCH_TPOFF + FX_S_RSHB, %rax	# the shadow stack empty: a run starts at depth 0
+	movq %rax, %fs:FX_SCRATCH_TPOFF + FX_S_RSH
 	movq %rsp, CTX_SAVED_RSP(%rdi)
 	movq %rdi, %rax
 	FX_VPU_RESTORE
@@ -788,3 +809,122 @@ fx_slice:
 9:	popq %r12
 	popq %rbx
 	ret
+
+# In-card calls (2026-10-14). A translated call site (host blob.S
+# .Lincall) puts the callee's host address in S_XFER, its own address in
+# S_SITE and the host return address in S_RETA, then calls *S_INCALL;
+# a translated ret pops the return address into S_SITE and jumps to
+# *S_INRET. The program's stack always holds what native execution
+# would (host return addresses), so any exit, anywhere, hands the host a
+# state it can run on; the blob's own return addresses live in this
+# thread's shadow stack (FX_S_RSHB, 4 KiB: 255 frames), emptied at every
+# run's start (fx_enter). See fexec.md.
+
+# fn_insert(rdi host address, rsi blob entry): into the table (the
+# address's own entry, or the first empty one); a table three quarters
+# full takes no more (the call then leaves the card, as before).
+fn_insert:
+	cmpq $FN_CAP * 3 / 4, fn_n(%rip)
+	jae 9f
+	movl %edi, %eax
+	shrl $4, %eax
+	andl $FN_CAP - 1, %eax
+	leaq fn_htab(%rip), %rdx
+1:	movq %rax, %rcx
+	shlq $4, %rcx
+	addq %rdx, %rcx
+	cmpq (%rcx), %rdi
+	je 3f
+	cmpq $0, (%rcx)
+	je 2f
+	incl %eax
+	andl $FN_CAP - 1, %eax
+	jmp 1b
+2:	incq fn_n(%rip)
+	movq %rdi, (%rcx)
+3:	movq %rsi, 8(%rcx)
+9:	ret
+
+# fexec_flush: a new session (K_FLUSH): the table of in-card calls, the
+# blobs' table and arena emptied (the host loads its blobs again; a
+# previous program's addresses must never match this one's).
+	.globl fexec_flush
+fexec_flush:
+	leaq fn_htab(%rip), %rdi
+	movl $FN_CAP * 2, %ecx
+	xorl %eax, %eax
+	rep stosq
+	movq $0, fn_n(%rip)
+	movq $0, fx_ntab(%rip)
+	movq $0, fx_arena_used(%rip)
+	ret
+
+# fx_incall: [rsp] the blob's return address (the call *S_INCALL), S_XFER
+# the callee's host address. The table has it: the shadow stack takes
+# {S_RETA, the blob's return}, the program's stack the host return in its
+# place, and control goes to the callee's blob with every register as the
+# call site had it (r11 aside: no caller keeps anything in r11 across a
+# call). Not in the table, or the shadow stack full: back to the site,
+# whose X_CALL exit follows. rax and rcx kept through S_T0 and S_T1 (rax
+# carries a variadic call's vector count); the flags are dead at a call.
+	.set SCR, FX_SCRATCH_TPOFF
+fx_incall:
+	movq %rax, %fs:SCR + FX_S_T0
+	movq %rcx, %fs:SCR + FX_S_T1
+	movq %fs:SCR + FX_S_XFER, %r11
+	movl %r11d, %eax
+	shrl $4, %eax
+	andl $FN_CAP - 1, %eax
+1:	movq %rax, %rcx
+	shlq $4, %rcx
+	addq $fn_htab, %rcx
+	cmpq (%rcx), %r11
+	je 3f
+	cmpq $0, (%rcx)
+	je 8f
+	incl %eax
+	andl $FN_CAP - 1, %eax
+	jmp 1b
+3:	movq 8(%rcx), %rcx			# the callee's blob entry
+	movq %fs:SCR + FX_S_RSH, %rax
+	leaq 16(%rax), %r11
+	testl $0xfff, %r11d
+	jz 8f					# 255 frames deep: the host takes this call
+	movq %fs:SCR + FX_S_RETA, %r11
+	movq %r11, (%rax)			# the host return address
+	movq (%rsp), %r11
+	addq $FX_INCALL_SKIP, %r11		# past the site's X_CALL exit: the instruction after the call
+	movq %r11, 8(%rax)			# the blob's
+	addq $16, %rax
+	movq %rax, %fs:SCR + FX_S_RSH
+	movq %fs:SCR + FX_S_RETA, %r11
+	movq %r11, (%rsp)			# the program's stack as a native call leaves it
+	movq %rcx, %r11
+	movq %fs:SCR + FX_S_T0, %rax
+	movq %fs:SCR + FX_S_T1, %rcx
+	jmp *%r11
+8:	movq %fs:SCR + FX_S_T0, %rax
+	movq %fs:SCR + FX_S_T1, %rcx
+	ret
+
+# fx_inret: S_SITE the return address a translated ret popped. When the
+# shadow stack's top is that address, the frame is the card's: popped,
+# and control back into the calling blob (rax, rdx and the vector
+# registers as the callee left them; r11 is dead at a return). Else the
+# region ends there: X_RET to the host, as before.
+fx_inret:
+	movq %rax, %fs:SCR + FX_S_T0
+	movq %fs:SCR + FX_S_RSH, %rax
+	testl $0xfff, %eax
+	jz 8f					# empty
+	movq -16(%rax), %r11
+	cmpq %fs:SCR + FX_S_SITE, %r11
+	jne 8f
+	movq -8(%rax), %r11
+	subq $16, %rax
+	movq %rax, %fs:SCR + FX_S_RSH
+	movq %fs:SCR + FX_S_T0, %rax
+	jmp *%r11
+8:	movq %fs:SCR + FX_S_T0, %rax
+	movl $X_RET, %fs:SCR + FX_S_KIND
+	jmp *%fs:FX_EXIT_TPOFF

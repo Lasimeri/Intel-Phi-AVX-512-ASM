@@ -21,7 +21,7 @@
 	.include "xlate.inc"
 
 	.set WU_MAX, 1024
-	.set STACK_SLACK, 16384			# how far below rsp - 128 a region may write its stack (on the alternate stack)
+	.set STACK_SLACK, 262144		# how far below rsp - 128 a region may write its stack (on the alternate stack): 256 KiB since in-card calls (2026-10-14) put the callees' frames there
 	.set WU_ADDR, 0				# the unit's address
 	.set WU_SHADOW, 8			# its shadow (64 KiB)
 	.set WU_LO, 16				# the lowest address lines are written back from (the stack unit: below the frame's rsp is the handler's own)
@@ -311,12 +311,12 @@ region_run:
 	addq $SD_REGS_OUT, %rsi
 	movl $REGS_BYTES, %edx
 	call mem_copy
-	movq 40(%rsp), %r14			# the fault's rip on the card
-	call seed_index
-	movq %rax, %rcx
-	shlq $7, %rcx				# MAX_CARDS * 8 = 128 bytes a seed
-	leaq cblob_tab(%rip), %rdx
-	subq (%rdx,%rcx), %r14			# the blob offset of the faulting instruction
+	movq 40(%rsp), %rdi			# the fault's rip on the card
+	call blob_at				# the region's blob, or a callee's an in-card call entered
+	testq %rax, %rax
+	jz .Lrg_step
+	movq %rax, %r13				# the region goes on in that blob
+	movq %rdx, %r14				# the blob offset of the faulting instruction
 	jmp .Lrg_post
 .Lrg_exit:
 	movl 16(%rsp), %eax			# the exit kind (eax held the reply's signal word: before 2026-10-14 every exit without a signal was taken as a resume, X_REFUSED too)
@@ -1993,4 +1993,40 @@ ro_need:
 	jmp 9f
 8:	xorl %eax, %eax
 9:	popq %rbx
+	ret
+
+# blob_at(card address rdi): the seed whose blob on card 0 holds the
+# address, in rax, and the offset in rdx; rax 0 when none does. A fault
+# inside a callee that an in-card call entered (card fexec.S fx_incall)
+# is in the callee's blob, not the region's: the re-post enters there
+# (the shadow stack starts empty again, so the callee's ret leaves the
+# card for the host, which goes on natively in the caller).
+	.text
+blob_at:
+	xorl %ecx, %ecx
+1:	cmpq nseeds(%rip), %rcx
+	jae 8f
+	movq %rcx, %rax
+	shlq $7, %rax				# MAX_CARDS * 8 bytes a seed; card 0's first
+	leaq cblob_tab(%rip), %rdx
+	movq (%rdx,%rax), %rdx
+	testq %rdx, %rdx
+	jz 2f
+	movq %rdi, %rsi
+	subq %rdx, %rsi
+	jb 2f
+	imulq $SD_BYTES, %rcx, %rax
+	leaq seeds(%rip), %r8
+	addq %r8, %rax
+	movq SD_ABLOB_LEN(%rax), %r9
+	testq %r9, %r9
+	jnz 3f
+	movq SD_BLOB_LEN(%rax), %r9
+3:	cmpq %r9, %rsi
+	jae 2f
+	movq %rsi, %rdx
+	ret
+2:	incq %rcx
+	jmp 1b
+8:	xorl %eax, %eax
 	ret

@@ -172,3 +172,12 @@ chunk card 0 already holds by units stays on that path. The progress line
 counts chunk fills, the read-only ones, and evictions. Measured
 (kernel5): 192 faults in one region in 2.07 s, about 10.8 ms a fault
 (the fill about 0.65 ms of it, the rest the region's exit and re-post).
+
+## In-card calls and the stack floor (2026-10-14)
+
+With in-card calls a region's callees put their frames below the rsp the
+region started with: `STACK_SLACK` went from 16 KiB to 256 KiB, so those
+frames lie above the floor (refreshed, shadowed, written back) when a
+region leaves the card inside a callee. A fault inside a callee is
+re-posted in the blob that holds the card's rip (`blob_at`, over every
+seed's blob on card 0), and the region's seed becomes that blob's.

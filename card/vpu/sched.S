@@ -534,7 +534,8 @@ sched_main:
 	je 16f
 	movl $E_KERNEL, reply_buf + SR_STATUS(%rip)
 	jmp 1f
-16:	call res_flush				# K_FLUSH: the session's residency dropped
+16:	call fexec_flush			# K_FLUSH: the previous session's blobs and in-card call table dropped
+	call res_flush				# K_FLUSH: the session's residency dropped
 	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
 	movq res_n(%rip), %rax			# the pool's bytes in exit_rip (free_bytes is the card's, set for every reply): the host pins up to them less its ring (card.S c0_victim)
 	shlq $21, %rax

@@ -504,6 +504,7 @@ blob_build:
 	movl $S_XFER, %ecx
 	call .Lseq_slot
 	call .Lsite_slot
+	call .Lincall				# the card first: the callee's blob, when it has one
 	movl $X_CALL, %eax
 	call .Lseq_kind
 	call .Lseq_jmp
@@ -605,6 +606,7 @@ blob_build:
 5:	cmpb $K_IJMP, IX_KIND(%r14)
 	je 6f
 	call .Lsite_slot
+	call .Lincall
 	movl $X_CALL, %eax
 	call .Lseq_kind
 	call .Lseq_jmp
@@ -627,7 +629,23 @@ blob_build:
 	movl $S_SITE, %eax
 	addl BL_SCRATCH(%rbx), %eax
 	call .Ldword
-	movl $X_RET, %eax
+	cmpq $0, incall_off(%rip)
+	jne 1f
+	# jmp *%fs:S_INRET (64 FF 24 25 disp32): the card returns into the
+	# calling blob when its shadow stack's top is this return, else X_RET
+	movl $0x64, %eax
+	call .Lbyte
+	movl $0xff, %eax
+	call .Lbyte
+	movl $0x24, %eax
+	call .Lbyte
+	movl $0x25, %eax
+	call .Lbyte
+	movl $S_INRET, %eax
+	addl BL_SCRATCH(%rbx), %eax
+	call .Ldword
+	jmp .Ladvance
+1:	movl $X_RET, %eax
 	call .Lseq_kind
 	call .Lseq_jmp
 	jmp .Ladvance
@@ -682,6 +700,36 @@ blob_build:
 	popq %rax
 	ret
 	.set .Lseq_slot_len, 9 + 10 + 9 + 9
+# .Lincall: at a call site (direct or indirect, the callee already in
+# S_XFER and the site in S_SITE), unless PHI512_INCALL=0: S_RETA = the
+# host return address (the site plus the call's length), then
+# call *%fs:S_INCALL (64 FF 14 25 disp32). The card's fx_incall jumps to
+# the callee's blob when its table has the callee (the program's stack
+# then holds the host return address, as a native call leaves it, and the
+# card's shadow stack the blob's), else returns here to the X_CALL exit
+# that follows. 37 + 8 bytes.
+.Lincall:
+	cmpq $0, incall_off(%rip)
+	jne 9f
+	movl IX_OFF(%r14), %eax
+	addq FN_ADDR(%r12), %rax
+	movzbl IX_LEN(%r14), %ecx
+	addq %rcx, %rax
+	movl $S_RETA, %ecx
+	call .Lseq_slot
+	movl $0x64, %eax
+	call .Lbyte
+	movl $0xff, %eax
+	call .Lbyte
+	movl $0x14, %eax
+	call .Lbyte
+	movl $0x25, %eax
+	call .Lbyte
+	movl $S_INCALL, %eax
+	addl BL_SCRATCH(%rbx), %eax
+	call .Ldword
+9:	ret
+
 # .Lseq_kind (eax the kind): mov dword [fs:S_KIND], kind (64 C7 04 25 disp32 imm32). 12 bytes.
 .Lseq_kind:
 	pushq %rax
@@ -1097,6 +1145,11 @@ blob_build:
 	jmp 1b
 9:	xorl %eax, %eax
 8:	ret
+	# the card's fx_incall returns FX_INCALL_SKIP bytes past its call: the
+	# X_CALL exit .Lincall leaves after it must be exactly that long
+	.if .Lseq_kind_len + .Lseq_jmp_len - FX_INCALL_SKIP
+	.error "the X_CALL exit after .Lincall is not FX_INCALL_SKIP bytes"
+	.endif
 	.section .note.GNU-stack,"",@progbits
 
 	.bss

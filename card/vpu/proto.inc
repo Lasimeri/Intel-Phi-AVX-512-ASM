@@ -85,6 +85,28 @@
 	.set FX_S_KIND, 436
 	.set FX_S_SITE, 440
 	.set FX_S_XFER, 448
+# In-card calls (2026-10-14): a translated call site puts the host return
+# address in FX_S_RETA and calls *FX_S_INCALL (fexec.S fx_incall: the
+# callee's blob when the card has it, else back to the site's X_CALL
+# exit); a translated ret jumps to *FX_S_INRET (fx_inret: back into the
+# calling blob when the shadow stack's top is that return, else X_RET).
+# FX_S_RSH is the thread's shadow stack top, FX_S_RSHB its base (4 KiB
+# aligned, 255 frames of {host return, blob return}), FX_S_T0/T1 temps.
+# They lie past the 512-byte scratch (its transfer slot FX_S_XFER takes
+# up to its end: the host's mvex2.S copies operands to FX_S_XFER + 32),
+# in the TLS block's free 2048..4095 (a first placement at 456..511 had
+# a block load overwrite FX_S_INCALL: #GP at the next call).
+	.set FX_INCALL_SKIP, 20			# a hit returns past the site's X_CALL exit (blob.S .Lseq_kind 12 + .Lseq_jmp 8 bytes)
+	.set FX_S_RETA, 512
+	.set FX_S_INCALL, 520
+	.set FX_S_INRET, 528
+	.set FX_S_RSH, 536
+	.set FX_S_RSHB, 544
+	.set FX_S_T0, 552
+	.set FX_S_T1, 560
+	.if FX_SCRATCH_TPOFF + FX_S_T1 + 8 > 4096		# (TLS_BYTES: the card's defs.inc, which the host does not include)
+	.error "the in-card call slots run past the TLS block"
+	.endif
 # K_FEXEC flags (SL_FLAGS).
 	.set FXF_IDSTACK, 1			# the file's rsp is the program's stack at identity: no run stack, no return stub
 	.set EXEC_MAX_RANGES, 64

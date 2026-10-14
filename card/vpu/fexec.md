@@ -82,3 +82,35 @@ find it awake.
 A single slice (step 0) runs on pool thread 0, through `vpu_pool_map` with
 two slices of which the second is empty, never on the slot's control
 thread (2026-10-13: that thread's core is the control plane's).
+
+## In-card calls (2026-10-14)
+
+Before this, every call in a blob, direct or through a pointer, left the
+card (`X_CALL`): llama.cpp's expert path calls `vec_dot` through a
+pointer once a row, which made a token millions of regions. Now a call
+site (host `blob.S` `.Lincall`) puts the callee's host address in
+`FX_S_XFER`, its own in `FX_S_SITE` and the host return address in
+`FX_S_RETA`, then `call *%fs:FX_S_INCALL`:
+
+- `fx_incall` looks the callee up in `fn_htab` (4096 entries of {host
+  function address, blob entry}, filled by `K_LOAD` from the request's
+  `fill_off` = the function's host address and `fill_len` = its entry's
+  blob offset, emptied by `fexec_flush` at `K_FLUSH`). A hit pushes
+  {host return, blob return} on this thread's shadow stack
+  (`fx_shadow`, 4 KiB a thread, 4 KiB aligned: 255 frames), writes the
+  host return address over the blob's on the program's stack (so the
+  stack is what a native call leaves, and any exit hands the host a
+  state it can run), and jumps to the callee's blob. A miss, or 255
+  frames, returns to the site, whose `X_CALL` exit follows as before.
+- A translated `ret` pops into `FX_S_SITE` and jumps to `*FX_S_INRET`:
+  `fx_inret` returns into the calling blob when the shadow stack's top
+  is that return address, else ends the region with `X_RET` there.
+
+Only r11 (dead at a call and at a return in the SysV convention) and the
+scratch words are touched; rax and rcx go through `FX_S_T0`/`FX_S_T1`
+(rax carries a variadic call's vector count, rcx an argument).
+`fx_enter` empties the shadow stack at every run's start, so a region
+re-posted after a fault inside a callee (the host finds the callee's
+blob: `region.S blob_at`) leaves the card at the callee's `ret` and the
+host goes on natively in the caller. `PHI512_INCALL=0` on the host
+builds blobs without any of this.

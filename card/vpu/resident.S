@@ -937,3 +937,311 @@ s_rmf1:	.asciz "resident: page "
 s_rmf2:	.asciz " not placed at "
 s_rmf3:	.asciz ": resv_free 0 or mremap gave "
 	.text
+
+# The card-side write-back diff (2026-10-14). Before, the host pulled
+# every writable unit back after every region (a K_PUSH of 64 KiB, about
+# 0.25 ms, per unit) to diff it against its shadow: a region cost about
+# 0.25 ms times the units in the table, which grew through llama-server's
+# load to ~200 requests a region. Now the card keeps its own copy of each
+# unit as the host sent it (wsh_base, a unit's copy at its wmap index;
+# filled with the unit, kept up by the refresh, fexec.S), and after a run
+# that the host will write back (K_FEXEC with FXF_CARDWB, an exit other
+# than a fault) the slot's pool compares every unit with its copy
+# (wd_slice: a bit per changed 64-byte line in wd_bits, the copy brought
+# up to date), then this thread lists the changed lines, runs of them as
+# ranges, in the slot data's write-back table and bytes (SD_WB_TAB,
+# SD_WB): the reply's wb_n, or -1 when they do not fit (the host then
+# pulls the units as before). The host applies them byte by byte against
+# its own shadow, as it did with the pulled units.
+	.set WD_SLICES_MAX, 32
+	.set WD_TAB_MAX, (SD_WB - SD_WB_TAB) / 16
+	.bss
+	.balign 64
+wsh_base:	.skip 8			# the units' card-side copies (WMAP_MAX x 64 KiB, no reserve)
+	.balign 64
+wd_bits:	.skip WMAP_MAX * 128	# per unit: a bit per 64-byte line the last run changed
+	.text
+
+# wsh_init: the copies' space, once, below the program's address range
+# (a hint: the worker's own mappings land there since the reservation
+# fails). eax 1 when it exists.
+wsh_init:
+	cmpq $0, wsh_base(%rip)
+	jne 1f
+	movabsq $0x500000000000, %rdi
+	movq $WMAP_MAX * WUNIT_BYTES, %rsi
+	movl $PROT_READ | PROT_WRITE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 9f
+	movq %rax, wsh_base(%rip)
+1:	movl $1, %eax
+	ret
+9:	xorl %eax, %eax
+	ret
+
+# wsh_of(rdi unit address): the unit's copy in rax, 0 when the unit is
+# not mapped here or there are no copies.
+wsh_of:
+	cmpq $0, wsh_base(%rip)
+	je 9f
+	call wmap_find
+	testl %eax, %eax
+	jz 9f
+	movq %rcx, %rax
+	shlq $16, %rax
+	addq wsh_base(%rip), %rax
+	ret
+9:	xorl %eax, %eax
+	ret
+
+# wsh_sync(rdi address, rsi bytes, multiples of 64): the copies brought
+# up to the program's memory over the range (the refresh just wrote it).
+	.globl wsh_sync
+wsh_sync:
+	cmpq $0, wsh_base(%rip)
+	je 9f
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq $-1, %r13				# the unit cached
+	xorl %r14d, %r14d			# its copy
+1:	testq %r12, %r12
+	jle 8f
+	movq %rbx, %rax
+	andq $-WUNIT_BYTES, %rax
+	cmpq %r13, %rax
+	je 2f
+	movq %rax, %r13
+	movq %rax, %rdi
+	call wsh_of
+	movq %rax, %r14
+2:	testq %r14, %r14
+	jz 3f
+	movq %rbx, %rdi
+	andl $WUNIT_BYTES - 1, %edi
+	addq %r14, %rdi
+	movq %rbx, %rsi
+	movl $1, %edx
+	call phi_copy64
+3:	addq $64, %rbx
+	subq $64, %r12
+	jmp 1b
+8:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+9:	ret
+
+# wsh_fill(rdi unit address): the unit's copy set from the unit (a fill
+# just wrote it whole).
+wsh_fill:
+	pushq %rbx
+	movq %rdi, %rbx
+	call wsh_of
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %rdi
+	movq %rbx, %rsi
+	movl $WUNIT_BYTES / 64, %edx
+	call phi_copy64
+9:	popq %rbx
+	ret
+
+# wd_slice(rdi arg, esi slice, edx slices): units [slice n / slices,
+# (slice + 1) n / slices) compared line by line with their copies; a
+# changed line copied into the copy and its bit set (vpu_pool_map's).
+wd_slice:
+	pushq %rbx
+	pushq %rbp
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movl %edx, %r8d				# slices
+	movl %esi, %r9d				# slice
+	movq wmap_n(%rip), %rax
+	movl %r9d, %ecx
+	imulq %rcx, %rax
+	xorl %edx, %edx
+	divq %r8
+	movq %rax, %r12				# the first unit
+	movq wmap_n(%rip), %rax
+	leal 1(%r9), %ecx
+	imulq %rcx, %rax
+	xorl %edx, %edx
+	divq %r8
+	movq %rax, %r13				# past the last
+1:	cmpq %r13, %r12
+	jae 9f
+	leaq wmap_tab(%rip), %rax
+	movq (%rax,%r12,8), %rbx		# the unit
+	movq %r12, %rbp
+	shlq $16, %rbp
+	addq wsh_base(%rip), %rbp		# its copy
+	movq %r12, %r14
+	shlq $7, %r14
+	leaq wd_bits(%rip), %rax
+	addq %rax, %r14				# its bits
+	xorl %ecx, %ecx				# the line's offset
+2:	xorl %r15d, %r15d			# a page's 64 bits
+	xorl %edx, %edx				# the line in the page
+3:
+	.irp off, 0, 8, 16, 24, 32, 40, 48, 56
+	movq \off(%rbx,%rcx), %rax
+	cmpq \off(%rbp,%rcx), %rax
+	jne 5f
+	.endr
+	jmp 6f
+5:
+	.irp off, 0, 8, 16, 24, 32, 40, 48, 56
+	movq \off(%rbx,%rcx), %rax
+	movq %rax, \off(%rbp,%rcx)
+	.endr
+	btsq %rdx, %r15
+6:	addq $64, %rcx
+	incl %edx
+	cmpl $64, %edx
+	jb 3b
+	movq %r15, (%r14)
+	addq $8, %r14
+	cmpq $WUNIT_BYTES, %rcx
+	jb 2b
+	incq %r12
+	jmp 1b
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbp
+	popq %rbx
+	ret
+
+# wb_card_diff(rdi the slot data in the window, rsi the reply): the
+# pool compares (wd_slice), then the changed lines, adjacent ones as one
+# range, into SD_WB_TAB ({address, bytes}) and SD_WB (their bytes in
+# order); the reply's wb_n the ranges, -1 when the table or the bytes
+# overflow (the host pulls the units then) or there are no copies.
+	.globl wb_card_diff
+wb_card_diff:
+	pushq %rbx
+	pushq %rbp
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $40, %rsp				# 0 the bits left, 8 the open range's start (0: none), 16 its bytes, 24 the line
+	movq %rdi, %r12
+	movq %rsi, %r13
+	movl $0, SR_WB_N(%r13)
+	cmpq $0, wmap_n(%rip)
+	je 90f
+	cmpq $0, wsh_base(%rip)
+	je 91f
+	movl $WD_SLICES_MAX, %edx
+	movl nthreads(%rip), %eax
+	cmpl %eax, %edx
+	jbe 1f
+	movl %eax, %edx
+1:	movq wmap_n(%rip), %rax
+	cmpq %rax, %rdx
+	jbe 2f
+	movl %eax, %edx
+2:	testl %edx, %edx
+	jnz 21f
+	movl $1, %edx
+21:	leaq wd_slice(%rip), %rdi
+	xorl %esi, %esi
+	call vpu_pool_map
+	xorl %ebx, %ebx				# the unit
+	xorl %r14d, %r14d			# ranges
+	xorl %r15d, %r15d			# bytes
+	movq $0, 8(%rsp)
+	movq $0, 16(%rsp)
+3:	cmpq wmap_n(%rip), %rbx
+	jae 80f
+	xorl %ebp, %ebp				# the page
+4:	cmpl $16, %ebp
+	jae 7f
+	movq %rbx, %rax
+	shlq $7, %rax
+	leaq wd_bits(%rip), %rcx
+	addq %rcx, %rax
+	movq (%rax,%rbp,8), %rax
+	movq %rax, 0(%rsp)
+5:	movq 0(%rsp), %rax
+	testq %rax, %rax
+	jz 6f
+	bsfq %rax, %rcx
+	btrq %rcx, %rax
+	movq %rax, 0(%rsp)
+	movl %ebp, %eax
+	shll $6, %eax
+	addl %ecx, %eax				# the line in the unit
+	shlq $6, %rax
+	leaq wmap_tab(%rip), %rdx
+	addq (%rdx,%rbx,8), %rax		# its address
+	movq %rax, 24(%rsp)
+	leaq 64(%r15), %rdx
+	cmpq $SD_WB_BYTES, %rdx
+	ja 91f
+	movq 8(%rsp), %rdx
+	testq %rdx, %rdx
+	jz 51f
+	addq 16(%rsp), %rdx
+	cmpq %rax, %rdx
+	jne 50f
+	addq $64, 16(%rsp)			# the open range grows
+	jmp 52f
+50:	cmpq $WD_TAB_MAX, %r14			# the open range closed
+	jae 91f
+	movq %r14, %rdx
+	shlq $4, %rdx
+	leaq SD_WB_TAB(%r12,%rdx), %rdx
+	movq 8(%rsp), %rcx
+	movq %rcx, (%rdx)
+	movq 16(%rsp), %rcx
+	movq %rcx, 8(%rdx)
+	incq %r14
+51:	movq 24(%rsp), %rax			# a new one
+	movq %rax, 8(%rsp)
+	movq $64, 16(%rsp)
+52:	leaq SD_WB(%r12,%r15), %rdi		# the line's bytes
+	movq 24(%rsp), %rsi
+	movl $1, %edx
+	call phi_copy64
+	addq $64, %r15
+	jmp 5b
+6:	incl %ebp
+	jmp 4b
+7:	incq %rbx
+	jmp 3b
+80:	cmpq $0, 8(%rsp)
+	je 81f
+	cmpq $WD_TAB_MAX, %r14
+	jae 91f
+	movq %r14, %rdx
+	shlq $4, %rdx
+	leaq SD_WB_TAB(%r12,%rdx), %rdx
+	movq 8(%rsp), %rcx
+	movq %rcx, (%rdx)
+	movq 16(%rsp), %rcx
+	movq %rcx, 8(%rdx)
+	incq %r14
+81:	movl %r14d, SR_WB_N(%r13)
+90:	addq $40, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbp
+	popq %rbx
+	ret
+91:	movl $-1, SR_WB_N(%r13)
+	jmp 90b

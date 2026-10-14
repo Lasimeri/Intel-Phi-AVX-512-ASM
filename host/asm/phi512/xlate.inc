@@ -26,6 +26,12 @@
 	.set S_KIND, 436			# an exit's kind (FX_S_KIND of proto.inc)
 	.set S_SITE, 440			# where the host resumes (FX_S_SITE)
 	.set S_XFER, 448			# (FX_S_XFER)
+	# in-card calls: past the 512-byte scratch (the transfer slot S_XFER
+	# runs to its end: mvex2.S XFER_HI = S_XFER + 32 takes up to 32 bytes
+	# more), in the TLS block's free 2048..4095 (card proto.inc FX_S_RETA)
+	.set S_RETA, 512			# an in-card call: the host return address
+	.set S_INCALL, 520			# the card's fx_incall
+	.set S_INRET, 528			# the card's fx_inret
 	.set S_NTEMPS, 6
 # The emitter (struct em), one per translated instruction, on the
 # caller's stack. The output pointer and limit belong to the blob; the

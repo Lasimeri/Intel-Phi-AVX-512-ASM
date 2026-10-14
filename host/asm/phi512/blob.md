@@ -71,3 +71,13 @@ Measured: `llama-server` went from refusing `common_params_fit_impl`
 (one VEX.128 `vshufpd`) at 1080 regions to 3679 regions with four lazy
 sites, none of them reached; [`avx512-region-test`](../../../tools/avx512-region-test.md)'s
 `kernel3` crosses card, host, card.
+
+## In-card calls (2026-10-14)
+
+A call site, direct or indirect, gets `.Lincall` between the callee and
+site slots and its `X_CALL` exit: `S_RETA` = the host return address
+(the site plus the call's length), then `call *%fs:S_INCALL` (the card's
+`fx_incall`: the callee's blob when the card holds it, else back here to
+the exit). A `ret` pops into `S_SITE` and jumps to `*%fs:S_INRET` (the
+card's `fx_inret`). See [`../../../card/vpu/fexec.md`](../../../card/vpu/fexec.md).
+`PHI512_INCALL=0` (main.S `incall_off`) keeps the old sequences.

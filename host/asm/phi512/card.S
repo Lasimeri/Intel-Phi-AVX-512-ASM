@@ -293,7 +293,28 @@ card_load_seed:
 	leaq 1(%r12), %rax
 	movq %rax, SL_FN_ID(%rdi)
 	movq %r13, SL_ENTRY(%rdi)		# the byte count
-	movq %rbx, %rdi
+	# an automatic blob: the function's host address and its entry's blob
+	# offset, for the card's table of in-card calls (fexec.S fx_incall)
+	cmpq $0, SD_ABLOB(%rcx)
+	je 2f
+	cmpq $0, SD_ADDR(%rcx)
+	je 2f
+	cmpq $0, SD_MAP(%rcx)
+	je 2f
+	pushq %rcx
+	pushq %rcx
+	movq %rcx, %rdi
+	movq SD_ADDR(%rcx), %rsi
+	call seed_entry
+	popq %rcx
+	popq %rcx
+	testq %rax, %rax
+	js 2f
+	movq CD_SLOTP(%rbx), %rdi
+	movq SD_ADDR(%rcx), %rdx
+	movq %rdx, SL_FILL_OFF(%rdi)
+	movq %rax, SL_FILL_LEN(%rdi)
+2:	movq %rbx, %rdi
 	movl $K_LOAD, %esi
 	call card_post
 	movq %rbx, %rdi
