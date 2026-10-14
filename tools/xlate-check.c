@@ -58,6 +58,8 @@ extern struct lazy { uint32_t off, kind; const char *why; } blob_lazy[];
 uint64_t incall_off = 0;
 /* the code is translated from the file, not mapped at its addresses: plt_resolve must not read call targets */
 extern uint64_t plt_resolve_off;
+/* elf.S names PLT stubs in the running process; never reached here (plt_resolve_off) */
+const char *plt_name(const void *stub) { (void)stub; return 0; }
 extern uint64_t x86_decode(const void *bytes, uint64_t avail, void *out, uint64_t addr);
 
 #define SCRATCH_TPOFF 0x1000

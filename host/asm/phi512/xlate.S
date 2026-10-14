@@ -121,6 +121,7 @@ xl_forms:
 	FORM MN_Vmovdqu64, xl_mov_unaligned, 0, XB_QWORD
 	FORM MN_Vmovdqu, xl_mov_unaligned, 0, 0
 	FORM MN_Vpmaskmovd, xl_maskmov, 0, 0
+	FORM MN_Vmovmskps, xl_movmsk, 0, 0
 	FORM MN_Shlx, xl_shiftx, 4, 0
 	FORM MN_Shrx, xl_shiftx, 5, 0
 	FORM MN_Sarx, xl_shiftx, 7, 0
@@ -4128,6 +4129,93 @@ xl_shiftx:
 .Lsx_shape:
 	leaq s_shape(%rip), %rax
 9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_movmsk: vmovmskps r32, xmm/ymm (VEX 0F 50 /r, register form): the
+# sign bits of the dword lanes into the low bits of r, the rest zero. The
+# card has no such move: the scratch mask set to the length's lanes,
+# vpcmpd k{k}, s, zero, 1 (lt: a negative int32 is a set sign bit), then
+# kmov eax, k into [fs:S_GPR] and r from there once all is restored
+# (em_gpr_result: rax was the transient). 2026-10-14: in
+# ggml_vec_soft_max_f32's loop, a host exit each (128 every 5 s).
+xl_movmsk:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	testb $H_MEM, IN_HAS(%r12)
+	jnz .Lmk2_shape
+	EV_LL %edi
+	movl $16, %eax
+	cmpl $2, %edi
+	je 1f
+	xorl %esi, %esi
+	call vl_lanes
+1:	movq %rbx, %rdi
+	movl %eax, %esi
+	call em_mask_imm
+	movl %eax, %r14d			# the scratch k: the length's lanes
+	movq %rbx, %rdi
+	call em_temp
+	testl %eax, %eax
+	js .Lmk2_notemp
+	movl %eax, %r15d
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movq %rsp, %rdi				# vpcmpd k{k}, s, zero, 1
+	movl $3, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x1f, %r8d
+	movl %r14d, %r9d
+	call mv_set
+	movzbl IN_RM(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	movw $1, MV_IMM(%rsp)
+	movb %r14b, MV_K(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl %r15d, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	movq %rbx, %rdi				# kmov eax, k (rax saved: em_mask_imm took it)
+	call em_rax
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl %r14d, %edx
+	call em_kmov_r_k
+	movq %rbx, %rdi				# into [fs:S_GPR]
+	xorl %esi, %esi
+	movl $1, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+	movq %rbx, %rdi				# r from there, last (32 bits: zero-extended)
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	movl $S_GPR, %ecx
+	call em_gpr_result
+	xorl %eax, %eax
+	jmp 9f
+.Lmk2_notemp:
+	leaq s_no_temp(%rip), %rax
+	jmp 9f
+.Lmk2_shape:
+	leaq s_shape(%rip), %rax
+9:	addq $MV_BYTES + 16, %rsp
+	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12

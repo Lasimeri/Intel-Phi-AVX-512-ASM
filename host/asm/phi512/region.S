@@ -2615,7 +2615,8 @@ tr_tab:		.skip TR_MAX * TR_BYTES
 	.balign 8
 tr_dec:		.skip 96			# IN_BYTES (x86dec.inc): x86_decode's out
 	.section .rodata
-s_libggml:	.asciz "libggml-cpu"		# the compute library: in libggml-base (the GGUF reader, tensor creation) every plain call a round trip made the load 20x slower (rs7)
+s_libggml:	.asciz "libggml-cpu"
+s_libm:		.asciz "/libm.so"		# the compute library: in libggml-base (the GGUF reader, tensor creation) every plain call a round trip made the load 20x slower (rs7)
 	.text
 	.globl phi512_tramp
 phi512_tramp:
@@ -2791,8 +2792,17 @@ cont_obj_ok:
 	call obj_at
 	testq %rax, %rax
 	jz 8f
+	pushq %rax
+	pushq %rax
 	leaq OBJ_PATH(%rax), %rdi
 	leaq s_libggml(%rip), %rsi
+	call str_has
+	popq %rdx
+	popq %rdx
+	testl %eax, %eax
+	jnz 1f
+	leaq OBJ_PATH(%rdx), %rdi			# libm too: expf and the like, called from the compute loops (C, nothing throws)
+	leaq s_libm(%rip), %rsi
 	jmp str_has
 1:	movl $1, %eax
 	ret

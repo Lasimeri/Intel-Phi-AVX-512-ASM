@@ -273,3 +273,7 @@ host go on when there is none. `PHI512_TRAMP_ANY=1` applies it to the
 test programs as well. The progress line's exit histogram (`ex_note`,
 `ex_print`: the three most frequent "kind in function +offset" of the
 interval) is how these were found.
+- libm counts with the compute library (`cont_obj_ok`: "/libm.so" in the
+  path): `expf` called from `gated_delta_net` (95 every 5 s) is translated
+  and called in-card, and continuation, the trampoline and the single step
+  apply there too. glibc's own code translated: the results stay bit-exact.

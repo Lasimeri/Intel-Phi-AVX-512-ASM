@@ -92,3 +92,9 @@ Gate: `avx512-narrow-test` section 31 (6 checks: vpmaskmovd ymm and xmm
 loads from unaligned addresses, the mask its own destination, ymm and
 xmm stores; shlx/shrx/sarx at 64 and 32 bits with rax, rcx, r8 to r10):
 80/80 on card 0. Built with `-mbmi2` added to the documented line.
+- `xl_movmsk` (vmovmskps r32, xmm/ymm, register form): the sign bits by
+  `vpcmpd k{k}, s, zero, 1` under the length's lanes, `kmov eax, k`, and r
+  from `[fs:S_GPR]` after the restore (zero-extended). In
+  `ggml_vec_soft_max_f32`'s loop (a host exit each, 128 every 5 s in
+  llama-server's first decode). Narrow suite: "vmovmskps ymm to ecx, xmm
+  to r9d" (81 checks).

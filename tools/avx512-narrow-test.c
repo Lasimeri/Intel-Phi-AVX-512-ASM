@@ -582,6 +582,17 @@ int main(void)
         w.q[2] = (uint64_t)(uint32_t)((int32_t)(uint32_t)x >> 3);
         w.q[3] = (uint64_t)((uint32_t)x << 5);
         check("shlx, shrx, sarx (64 and 32 bits, rax/rcx/r8-r10)", &r, &w, 16);
+        {
+            static float mf[8] __attribute__((aligned(32))) = { -1.0f, 2.0f, -0.0f, 3.5f, -7.25f, 0.5f, 1e-30f, -1e30f };
+            uint32_t m1 = 0, m2 = 0;
+            asm volatile("vmovups %2, %%zmm17\n\tvmovups (%3), %%ymm6\n\tvmovmskps %%ymm6, %%ecx\n\tmov %%ecx, %0\n\tvmovmskps %%xmm6, %%r9d\n\tmov %%r9d, %1"
+                         : "=m"(m1), "=m"(m2) : "m"(a), "r"(mf) : "rcx", "r9", "xmm6", "xmm17", "memory");
+            uint32_t w1 = 0;
+            for (int i = 0; i < 8; i++) if (signbit(mf[i])) w1 |= 1u << i;
+            memset(&r, 0, sizeof r); r.u[0] = m1; r.u[1] = m2;
+            memset(&w, 0, sizeof w); w.u[0] = w1; w.u[1] = w1 & 15;
+            check("vmovmskps ymm to ecx, xmm to r9d", &r, &w, 16);
+        }
     }
     if (fails) {
         printf("FAIL: %d check(s) wrong\n", fails);
