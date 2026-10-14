@@ -536,9 +536,9 @@ sched_main:
 	jmp 1f
 16:	call res_flush				# K_FLUSH: the session's residency dropped
 	movq %rax, reply_buf + SR_EXIT_AUX(%rip)
-	movq res_n(%rip), %rax			# the pool's bytes: the host pins up to them less its ring (card.S c0_victim)
+	movq res_n(%rip), %rax			# the pool's bytes in exit_rip (free_bytes is the card's, set for every reply): the host pins up to them less its ring (card.S c0_victim)
 	shlq $21, %rax
-	movq %rax, reply_buf + SR_FREE_BYTES(%rip)
+	movq %rax, reply_buf + SR_EXIT_RIP(%rip)
 	jmp 1f
 15:	# K_PUSH: the dispatcher submitted the engine's copy of the bytes at
 	# fn_id (resident here) into the staging slot; waited for here

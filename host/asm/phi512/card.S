@@ -186,8 +186,8 @@ card_add:
 	call card_wait
 	testl %eax, %eax
 	jnz .Lca_flush
-	movq CD_SLOTP(%rbx), %rcx		# the pool's bytes (0 from an older worker: no eviction)
-	movq SLOT_REPLY + SR_FREE_BYTES(%rcx), %rax
+	movq CD_SLOTP(%rbx), %rcx		# the pool's bytes, K_FLUSH's exit_rip (0 from an older worker: no eviction)
+	movq SLOT_REPLY + SR_EXIT_RIP(%rcx), %rax
 	shrq $21, %rax
 	movq CD_INDEX(%rbx), %rdx
 	leaq c0_pool(%rip), %rcx

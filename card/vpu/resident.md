@@ -133,3 +133,32 @@ has no page for it: `res_push` returns 0, the dispatcher marks -2) is the
 slot's own copy into the staging slot (`res_push_unit`). `K_FLUSH`
 restores the reservation over every unit (`res_unmap_units`). The pool
 and its chunks stay for the immutable class.
+
+## Eviction of read-only chunks (2026-10-14)
+
+The cards run every region whatever the residency: a chunk of the
+program that is immutable (inside one readable, not writable mapping: the
+mmapped model) comes as class 0, one pool page filled by DMA, and once
+the pool is full the host names a victim in the `K_RESIDENT`
+(`SL_VICTIM`, request offset 360; `SL_REQ_BYTES` 368). The dispatcher
+frees the victim's page first (`res_drop`: address 0, state free, the
+frame kept), so `res_assign` gives it to the new chunk; the slot process,
+before every run, moves every page it placed whose table entry no longer
+names that address back to its pool address (`res_unplace_stale`, from
+the per-process `res_at`, which `res_flush` also uses), so the old
+address faults again instead of reading the page's new chunk. No
+CLEVICT: a read-only chunk's lines are never dirty, and DMA writes reach
+clean cached lines (the stack's `docs/results/2026-09-16-dma.md`).
+`K_FLUSH`'s reply carries the pool's bytes in `exit_rip` (every reply's
+`free_bytes` is the card's own, set at the reply's end).
+
+The address reservation (`reserve_high`) has failed with EEXIST at every
+start so far (the pool's log line now says so: "address reservation ...:
+-17"); placement works through `resv_free`'s probe of a hole. Because of
+that, `resv_restore` now puts a PROT_NONE page back only in a piece the
+reservation holds: before, it mapped one at every evicted address and the
+probe then found the address taken (an evicted chunk could never come
+back: E_ALLOC on the second pass of the region test's kernel5).
+
+Gate: `tools/avx512-region-test.c` kernel5 (384 MiB of a PROT_READ file
+mapping, read twice, against a 256 MiB pool at `-R 128`): bit-exact.

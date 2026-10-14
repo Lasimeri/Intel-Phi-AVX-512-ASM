@@ -49,6 +49,7 @@ s_res_pagemap:	.asciz "/proc/self/pagemap"
 s_res_pool1:	.asciz "resident: pool of "
 s_res_pool2:	.asciz " huge page(s), "
 s_res_pool3:	.asciz " MiB, frames read"
+s_res_pool4:	.asciz "; address reservation (1 GiB pieces, or the error): "
 s_res_nopool:	.asciz "resident: no pool: the huge pages or pagemap were refused (-R 0)"
 
 	.text
@@ -137,6 +138,10 @@ res_init:
 	call w_dec
 	leaq s_res_pool3(%rip), %rsi
 	call w_str
+	leaq s_res_pool4(%rip), %rsi
+	call w_str
+	movq resv_got(%rip), %rdi
+	call w_sdec
 	movl $1, %edi
 	call l_end
 9:	popq %r13
@@ -367,7 +372,26 @@ res_map_all:
 	jmp 1b
 7:	incq %rbx
 	jmp 1b
-11:	movq $1, res_map_failed(%rip)		# this chunk cannot be placed: the next ones still are
+11:	pushq %rax				# (the line: page, address, resv_free 0 or mremap's result)
+	pushq %rax
+	call l_begin
+	leaq s_rmf1(%rip), %rsi
+	call w_str
+	movq %rbx, %rdi
+	call w_dec
+	leaq s_rmf2(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	call w_hexn
+	leaq s_rmf3(%rip), %rsi
+	call w_str
+	movq (%rsp), %rdi
+	call w_hexn
+	movl $2, %edi
+	call l_end
+	popq %rax
+	popq %rax
+	movq $1, res_map_failed(%rip)		# this chunk cannot be placed: the next ones still are
 	incq %rbx
 	jmp 1b
 8:	movl %r13d, %eax
@@ -528,6 +552,7 @@ res_flush:
 	.balign 64
 resv_bits:	.skip RESV_PIECES / 8
 res_map_failed:	.skip 8
+resv_got:	.skip 8			# reserve_high: the pieces, or mmap's error
 	.text
 
 # reserve_high: the reservation, once, before the worker's first mmap:
@@ -550,8 +575,10 @@ reserve_high:
 	movq $-1, %rax
 	rep stosq
 	movl $RESV_PIECES, %eax
+	movq %rax, resv_got(%rip)
 	ret
-9:	xorl %eax, %eax
+9:	movq %rax, resv_got(%rip)		# (the error, negative: the pool's log line says it)
+	xorl %eax, %eax
 	ret
 
 # resv_free(rdi address, 2 MiB aligned): eax 1 when a resident page may
@@ -606,6 +633,13 @@ resv_restore:
 	movabsq $RESV_HI, %rax
 	cmpq %rax, %rdi
 	jae 9f
+	movq %rdi, %rcx				# a piece the reservation never held keeps the hole the page left: resv_free
+	movabsq $RESV_LO, %rax			# probes holes, and a PROT_NONE page there would read as taken (2026-10-14:
+	subq %rax, %rcx				# an evicted chunk's address could never be placed again)
+	shrq $30, %rcx
+	leaq resv_bits(%rip), %rax
+	btq %rcx, (%rax)
+	jnc 9f
 	movl $HUGE_BYTES, %esi
 	movl $PROT_NONE, %edx
 	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, %r10d
@@ -897,3 +931,9 @@ res_unmap_units:
 	movq $0, wmap_n(%rip)
 	popq %rbx
 	ret
+
+	.section .rodata
+s_rmf1:	.asciz "resident: page "
+s_rmf2:	.asciz " not placed at "
+s_rmf3:	.asciz ": resv_free 0 or mremap gave "
+	.text

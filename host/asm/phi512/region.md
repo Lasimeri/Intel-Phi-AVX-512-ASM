@@ -161,3 +161,14 @@ phi512: progress at 65 s: 6905 regions (79/s), 99.9% of the time in regions, 41 
 ```
 
 Seconds count from the constructor (close to llama's own log clock). The rate and the share are over the interval since the previous line; the share is host wall time inside region_run. Reason: under the preload llama-server's loader prints nothing for minutes at its default verbosity, and two runs were killed as hung on 2026-10-14 while card 0 was 87.7% busy.
+
+## Immutable chunks (2026-10-14)
+
+A card fault in a 2 MiB chunk wholly inside one readable, not writable
+mapping (`elf.S chunk_immutable`) is queued as the whole chunk, class 0
+(`ro_need`): no unit, no shadow, no refresh, no write-back, the 1024-unit
+table untouched; any other chunk takes the 64 KiB unit path as before. A
+chunk card 0 already holds by units stays on that path. The progress line
+counts chunk fills, the read-only ones, and evictions. Measured
+(kernel5): 192 faults in one region in 2.07 s, about 10.8 ms a fault
+(the fill about 0.65 ms of it, the rest the region's exit and re-post).

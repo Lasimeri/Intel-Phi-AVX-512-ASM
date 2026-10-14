@@ -63,3 +63,14 @@ the fill range (0 bytes for a chunk only written: the page), and
 `card_push_post` asks the engine for a piece (within one chunk, at most
 2 MiB) into a staging slot, `card_push_done` copies it out. One request
 is in flight per card; [`sigill.md`](sigill.md) runs the rounds.
+
+## Class 0 and eviction (2026-10-14)
+
+`c0_victim` (from `card_resident_post` for class 0): a chunk the table
+holds takes no page; the first pool - 16 class-0 chunks are pinned for
+the session; the last 16 pages are a FIFO ring whose oldest chunk is the
+victim (removed from the table, named in `SL_VICTIM`). Pinning plus a
+ring, not LRU: a token reads the weights in the same order every time,
+LRU over a cyclic stream larger than the pool keeps nothing, the pinned
+part hits every token. The pool's size comes from `K_FLUSH`'s `exit_rip`
+(0 from an older worker: no eviction). `stat_evictions` counts victims.
