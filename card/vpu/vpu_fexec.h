@@ -67,6 +67,8 @@
 #define VPU_X_JUMP       9   /* the host resumes at exit_rip (a branch out, an indirect jump, a return) */
 #define VPU_X_HOST      10   /* an instruction the host runs itself (the blob's lazy path): the host resumes at exit_rip */
 #define VPU_FXF_IDSTACK  1   /* K_FEXEC flags: the file's rsp is the program's stack at identity */
+#define VPU_FXF_CARDWB   2   /* after a run that did not fault: the card's own diff as the write-back */
+#define VPU_FXF_DIFFONLY 4   /* nothing run: only the card's own diff (a region moving to another card) */
 #define VPU_FX_EXIT_TPOFF 1048 /* fs-relative: the exit stub's address (TLS_EXEC + 24) */
 #define VPU_FX_S_KIND    436 /* scratch slots the exit reads: the kind, the resume address, the aux */
 #define VPU_FX_S_SITE    440

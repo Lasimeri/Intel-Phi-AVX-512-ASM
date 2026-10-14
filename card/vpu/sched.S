@@ -647,7 +647,15 @@ sched_main:
 	jns 131f
 	movl $E_ALLOC, reply_buf + SR_STATUS(%rip)
 	jmp 1f
-131:	leaq slreq(%rip), %rdi
+131:	testl $FXF_DIFFONLY, slreq + SL_FLAGS(%rip)
+	jz 132f
+	# nothing run, no refresh applied: the card's own diff alone (a
+	# region that faulted on a chunk another card owns moves there; what
+	# it wrote here goes back first, host region.S rg_move)
+	movl $0, reply_buf + SR_STATUS(%rip)
+	movl $X_RET, reply_buf + SR_EXIT_KIND(%rip)
+	jmp 133f
+132:	leaq slreq(%rip), %rdi
 	movl %r12d, %esi
 	leaq reply_buf(%rip), %rdx
 	movq %r12, %rcx
@@ -662,7 +670,7 @@ sched_main:
 	jz 1f					# without writing back: a diff now would move the baseline past lines it never got)
 	cmpl $X_FAULT, reply_buf + SR_EXIT_KIND(%rip)
 	je 1f
-	movq %r12, %rdi
+133:	movq %r12, %rdi
 	shlq $20, %rdi
 	addq $OFF_SLOTDATA, %rdi
 	addq window(%rip), %rdi
