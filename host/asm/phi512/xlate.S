@@ -2260,11 +2260,31 @@ xl_interleave:
 	popq %rbx
 	ret
 
+# em_or_xfer(em rdi): or [fs:scratch + S_XFER], eax (64 09 04 25
+# disp32): a flag bit into the flags xl_comis composes in the scratch.
+em_or_xfer:
+	movl $0x64, %eax
+	call em_byte
+	movl $0x09, %eax
+	call em_byte
+	movl $0x04, %eax
+	call em_byte
+	movl $0x25, %eax
+	call em_byte
+	movl EM_SCRATCH(%rdi), %eax
+	addl $S_XFER, %eax
+	call em_dword
+	ret
+
 # xl_comis: vcomiss/vucomiss/vcomisd/vucomisd: the flags from three
 # compares of lane 0 into the scratch mask (less: CF; equal: ZF;
-# unordered: ZF, PF and CF), composed in ecx, written to [fs:S_XFER],
-# which em_finish puts into the flags last of all (rewrite.rs comis). A
-# memory operand is the broadcast source (SSS 001).
+# unordered: ZF, PF and CF), composed in [fs:S_XFER] (a mov, then two
+# ors), which em_finish puts into the flags last of all (rewrite.rs
+# comis). A memory operand is the broadcast source (SSS 001). Before
+# 2026-10-14 the bits were composed in ecx, which each compare's memory
+# operand reloaded when its address used rcx (`vcomiss
+# 0x0(%r13,%rcx,4),%xmm0` in ggml's argsort): the flags were the index's
+# low bits, and the expert router's sort came out unordered (lb5).
 xl_comis:
 	pushq %rbx
 	pushq %r12
@@ -2315,8 +2335,14 @@ xl_comis:
 	call em_kmov_r_k
 	movq %rbx, %rdi
 	leaq .Lb_comis1(%rip), %rsi
-	movl $5, %edx
-	call em_bytes				# and eax, 1; mov ecx, eax
+	movl $3, %edx
+	call em_bytes				# and eax, 1
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	movl $S_XFER, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:S_XFER], eax
 	# ZF: equal (0)
 	movw $0, MV_IMM(%rsp)
 	movq %rbx, %rdi
@@ -2328,8 +2354,10 @@ xl_comis:
 	call em_kmov_r_k
 	movq %rbx, %rdi
 	leaq .Lb_comis2(%rip), %rsi
-	movl $8, %edx
-	call em_bytes				# and eax, 1; shl eax, 6; or ecx, eax
+	movl $6, %edx
+	call em_bytes				# and eax, 1; shl eax, 6
+	movq %rbx, %rdi
+	call em_or_xfer				# or [fs:S_XFER], eax
 	# ZF, PF, CF: unordered (3)
 	movw $3, MV_IMM(%rsp)
 	movq %rbx, %rdi
@@ -2341,14 +2369,10 @@ xl_comis:
 	call em_kmov_r_k
 	movq %rbx, %rdi
 	leaq .Lb_comis3(%rip), %rsi
-	movl $10, %edx
-	call em_bytes				# and eax, 1; neg eax; and eax, 0x45; or ecx, eax
+	movl $8, %edx
+	call em_bytes				# and eax, 1; neg eax; and eax, 0x45
 	movq %rbx, %rdi
-	movl $1, %esi
-	xorl %edx, %edx
-	movl $S_XFER, %ecx
-	movl $1, %r8d
-	call em_gpr_scratch			# mov [fs:S_XFER], ecx
+	call em_or_xfer				# or [fs:S_XFER], eax
 	movl $S_XFER, EM_FLAGS_OUT(%rbx)
 	xorl %eax, %eax
 	addq $MV_BYTES + 16, %rsp

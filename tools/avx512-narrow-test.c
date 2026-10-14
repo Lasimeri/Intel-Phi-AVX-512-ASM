@@ -214,6 +214,23 @@ int main(void)
         w.q[1] = b.q[1];
         check("vmovsd xmm16-18 (EVEX 11, MVR)", &r, &w, 16);
     }
+    /* vcomiss with a memory operand indexed by rcx: above, below, equal
+     * (2026-10-14: the flags were composed in ecx, which each compare's
+     * memory operand reloaded, so they came out as the index's low bits;
+     * ggml's argsort left the expert router unordered, lb5) */
+    {
+        static float tbl[128];
+        for (int i = 0; i < 128; i++) tbl[i] = (float) i;
+        static const float xs[3] = { 100.0f, 30.0f, 65.0f };
+        static const uint64_t want[3] = { 0, 0x01, 0x40 };
+        static const char *names[3] = { "vcomiss (rbx,rcx,4): above", "vcomiss (rbx,rcx,4): below", "vcomiss (rbx,rcx,4): equal" };
+        for (int t = 0; t < 3; t++) {
+            uint64_t got = 0;
+            asm volatile("vmovups %2, %%zmm16\n\tvmovss %3, %%xmm0\n\tmov $65, %%rcx\n\tvcomiss (%1,%%rcx,4), %%xmm0\n\tpushfq\n\tpop %%rax\n\tmov %%rax, %0"
+                         : "=m"(got) : "r"(tbl), "m"(a), "m"(xs[t]) : "rax", "rcx", "xmm0", "xmm16", "memory", "cc");
+            check_u64(names[t], got & 0x45, want[t]);
+        }
+    }
 
     /* 9. float16: vcvtph2ps from unaligned memory and from a register; vcvtps2ph */
     {

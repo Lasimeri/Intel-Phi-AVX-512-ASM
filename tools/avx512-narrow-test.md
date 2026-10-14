@@ -99,3 +99,14 @@ overwrote the element's source when it was the destination. gcc's
 stale pointer into a row address (llama-bench's prompt pass faulted at
 0xffffd6ed650d2240, lb1-lb4). With the old library the four checks
 fail; with the fix 89 of 89.
+
+`vcomiss` with a memory operand indexed by rcx, above, below and equal
+(2026-10-14): the recipe composed the flags in ecx between its three
+compares, and each compare's memory operand reloaded the program's rcx
+for its address, so the flags came out as the index's low bits (65:
+0x41, "below and equal" for every case). ggml's argsort (the MoE
+router's top-k) compares `vcomiss 0x0(%r13,%rcx,4),%xmm0`: its rows came
+out unordered and llama-bench's prompt pass picked the wrong experts
+(lb5, the per-op compare against the AVX2 build: ffn_moe_topk-0 the
+first tensor to differ). The flags are composed in the scratch slot
+now. With the old library the three checks fail; with the fix 92 of 92.
