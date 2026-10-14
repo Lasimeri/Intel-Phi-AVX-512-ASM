@@ -261,24 +261,58 @@ fn gen_opcodes(out: &str) -> Result<()> {
         if oc.decoder_option() != DecoderOptions::NONE {
             continue;
         }
-        let w = if oc.is_wig() || oc.is_wig32() { "W".to_string() } else { oc.w().to_string() };
+        let w = if oc.is_wig() || oc.is_wig32() {
+            "W".to_string()
+        } else {
+            oc.w().to_string()
+        };
         let l = if oc.is_lig() { "L".to_string() } else { oc.l().to_string() };
         let mut flags = String::new();
-        if oc.can_broadcast() { flags.push('b'); }
-        if oc.can_use_zeroing_masking() { flags.push('z'); }
-        if oc.can_use_op_mask_register() { flags.push('k'); }
-        if oc.require_op_mask_register() { flags.push('K'); }
-        if oc.can_use_rounding_control() { flags.push('r'); }
-        if oc.can_suppress_all_exceptions() { flags.push('e'); }
-        if oc.ignores_mod_bits() { flags.push('m'); }
-        if oc.is_stack_instruction() { flags.push('s'); }
-        if oc.is_nop() || oc.is_reserved_nop() { flags.push('n'); }
-        if oc.fwait() { flags.push('f'); }
-        if oc.can_use_lock_prefix() { flags.push('l'); }
-        if oc.default_op_size64() { flags.push('D'); }
-        if oc.force_op_size64() { flags.push('F'); }
-        if oc.is_privileged() { flags.push('p'); }
-        if flags.is_empty() { flags.push('-'); }
+        if oc.can_broadcast() {
+            flags.push('b');
+        }
+        if oc.can_use_zeroing_masking() {
+            flags.push('z');
+        }
+        if oc.can_use_op_mask_register() {
+            flags.push('k');
+        }
+        if oc.require_op_mask_register() {
+            flags.push('K');
+        }
+        if oc.can_use_rounding_control() {
+            flags.push('r');
+        }
+        if oc.can_suppress_all_exceptions() {
+            flags.push('e');
+        }
+        if oc.ignores_mod_bits() {
+            flags.push('m');
+        }
+        if oc.is_stack_instruction() {
+            flags.push('s');
+        }
+        if oc.is_nop() || oc.is_reserved_nop() {
+            flags.push('n');
+        }
+        if oc.fwait() {
+            flags.push('f');
+        }
+        if oc.can_use_lock_prefix() {
+            flags.push('l');
+        }
+        if oc.default_op_size64() {
+            flags.push('D');
+        }
+        if oc.force_op_size64() {
+            flags.push('F');
+        }
+        if oc.is_privileged() {
+            flags.push('p');
+        }
+        if flags.is_empty() {
+            flags.push('-');
+        }
         let ops: Vec<String> = (0..oc.op_count()).map(|i| format!("{:?}", oc.op_kind(i))).collect();
         let ops = if ops.is_empty() { "-".to_string() } else { ops.join(",") };
         writeln!(
@@ -338,7 +372,11 @@ fn dump(path: &str) -> Result<()> {
                     let base = insn.memory_base();
                     let idx = insn.memory_index();
                     let d = insn.memory_displacement64() as i64;
-                    let d = if base == Register::RIP { (insn.memory_displacement64() as i64) - (insn.next_ip() as i64) } else { d };
+                    let d = if base == Register::RIP {
+                        (insn.memory_displacement64() as i64) - (insn.next_ip() as i64)
+                    } else {
+                        d
+                    };
                     mem = format!(
                         "{:?} {:?} {} {}",
                         base,
@@ -347,8 +385,14 @@ fn dump(path: &str) -> Result<()> {
                         if d < 0 { format!("-{:x}", -d) } else { format!("{:x}", d) }
                     );
                 }
-                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64
-                | OpKind::Immediate8to16 | OpKind::Immediate8to32 | OpKind::Immediate8to64 | OpKind::Immediate32to64
+                OpKind::Immediate8
+                | OpKind::Immediate16
+                | OpKind::Immediate32
+                | OpKind::Immediate64
+                | OpKind::Immediate8to16
+                | OpKind::Immediate8to32
+                | OpKind::Immediate8to64
+                | OpKind::Immediate32to64
                 | OpKind::Immediate8_2nd => {
                     let v = insn.immediate(i) as i64;
                     imm = if v < 0 { format!("-{:x}", -v) } else { format!("{:x}", v) };
