@@ -3022,6 +3022,36 @@ cont_obj_ok:
 8:	xorl %eax, %eax
 	ret
 
+# thunk_resolve(address rdi): plt_resolve, then through thunks: a
+# function whose entry (after an endbr64) is a jmp rel32 is followed to
+# its target, up to four times, each target resolved again. rax the
+# function. 2026-10-14: ggml_is_contiguous is `jmp
+# ggml_is_contiguous_0@plt`; translated as itself, its jmp left the card
+# at every call (an X_JUMP into the PLT stub, the in-card call chain
+# abandoned: mul_mat went on on the host, a region a row; lb11).
+thunk_resolve:
+	pushq %rbx
+	pushq %r12
+	call plt_resolve
+	movq %rax, %rbx
+	movl $4, %r12d
+1:	movq %rbx, %rcx
+	cmpl $0xfa1e0ff3, (%rcx)		# endbr64
+	jne 2f
+	addq $4, %rcx
+2:	cmpb $0xe9, (%rcx)
+	jne 8f
+	movslq 1(%rcx), %rax
+	leaq 5(%rcx,%rax), %rdi
+	call plt_resolve
+	movq %rax, %rbx
+	decl %r12d
+	jnz 1b
+8:	movq %rbx, %rax
+	popq %r12
+	popq %rbx
+	ret
+
 # alias_check(callee rdi): a call that left the card for a PLT stub whose
 # GOT slot has resolved (since the caller's blob was built: plt_resolve
 # then saw it unresolved) to a function with a blob: the stub's address
@@ -3043,7 +3073,7 @@ alias_check:
 	pushq %r13
 	pushq %r14
 	movq %rdi, %rbx
-	call plt_resolve
+	call thunk_resolve			# (a stub, then through thunks)
 	cmpq %rbx, %rax
 	je 9f
 	movq %rax, %r12				# the function
@@ -3466,7 +3496,7 @@ stat_callee:	.skip 8
 callee_promote:
 	pushq %rbx
 	pushq %r12
-	call plt_resolve
+	call thunk_resolve			# the function a stub or a thunk leads to
 	movq %rax, %rbx				# the function
 	movq %rbx, %rdi
 	call cont_obj_ok
