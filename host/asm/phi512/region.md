@@ -151,3 +151,13 @@ first report, after a region of `common_log`'s worker thread, was
 that). Checked against a
 program that breaks a chunk's size natively between two regions
 ("before region 2", the chunk and its field exactly).
+
+## The progress line (2026-10-14)
+
+`heartbeat`, called from region_run after each region, writes one line to standard error at most every 5 s, always on (not gated by `PHI512_VERBOSE`):
+
+```
+phi512: progress at 65 s: 6905 regions (79/s), 99.9% of the time in regions, 41 fault(s), 33483 write-back line(s); last region in ggml_backend_buffer_init
+```
+
+Seconds count from the constructor (close to llama's own log clock). The rate and the share are over the interval since the previous line; the share is host wall time inside region_run. Reason: under the preload llama-server's loader prints nothing for minutes at its default verbosity, and two runs were killed as hung on 2026-10-14 while card 0 was 87.7% busy.

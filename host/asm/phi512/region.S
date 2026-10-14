@@ -401,6 +401,8 @@ region_run:
 	subq 8(%rsp), %rax
 	addq %rax, stat_region_ns(%rip)
 	movq %rax, %r15
+	movq SD_NAME(%r13), %rdi		# the progress line (heartbeat, at most every 5 s)
+	call heartbeat
 	cmpq $0, verbose(%rip)
 	je 2f
 	call l_begin
@@ -1819,3 +1821,112 @@ s_procmem:	.asciz "/proc/self/mem"
 wb_cur:		.skip 64			# the program's line as wb_line_apply read it
 mem_wfd:	.skip 8				# /proc/self/mem read-write, fd + 1 (0: not open)
 	.text
+
+# heartbeat(name rdi): a progress line to standard error at most every
+# 5 s, from region_run's completion, always on. Without it a load under
+# the preload prints nothing for minutes (llama-server's loader is quiet
+# at its default verbosity) and looks hung: two runs were killed for that
+# on 2026-10-14. The line: seconds since the constructor, regions so far,
+# the interval's regions per second, the share of the interval spent in
+# region_run (host wall from posting to the frame back), faults, write-back
+# lines, and the function of the region just finished.
+	.bss
+	.balign 8
+	.globl hb_t0, hb_last
+hb_t0:		.skip 8			# the constructor's now_ns (main.S)
+hb_last:	.skip 8			# the last line's now_ns
+hb_regions:	.skip 8			# stat_regions at the last line
+hb_rns:		.skip 8			# stat_region_ns at the last line
+	.section .rodata
+s_hb1:	.asciz "phi512: progress at "
+s_hb2:	.asciz " s: "
+s_hb3:	.asciz " regions ("
+s_hb4:	.asciz "/s), "
+s_hb5:	.asciz "% of the time in regions, "
+s_hb6:	.asciz " fault(s), "
+s_hb7:	.asciz " write-back line(s); last region in "
+	.text
+	.globl heartbeat
+heartbeat:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %r12
+	call now_ns
+	movq %rax, %rbx				# now
+	movq %rax, %r13
+	subq hb_last(%rip), %r13		# the interval, ns
+	movabsq $5000000000, %rax
+	cmpq %rax, %r13
+	jb 9f
+	movq stat_regions(%rip), %r14
+	subq hb_regions(%rip), %r14		# the interval's regions
+	movq stat_region_ns(%rip), %r15
+	subq hb_rns(%rip), %r15			# the interval's time in region_run
+	call l_begin
+	leaq s_hb1(%rip), %rsi
+	call w_str
+	movq %rbx, %rax
+	subq hb_t0(%rip), %rax
+	xorl %edx, %edx
+	movl $1000000000, %ecx
+	divq %rcx
+	movq %rax, %rdi
+	call w_dec
+	leaq s_hb2(%rip), %rsi
+	call w_str
+	movq stat_regions(%rip), %rdi
+	call w_dec
+	leaq s_hb3(%rip), %rsi
+	call w_str
+	movq %r14, %rax
+	imulq $1000000000, %rax, %rax
+	xorl %edx, %edx
+	divq %r13
+	movq %rax, %rdi
+	call w_dec
+	leaq s_hb4(%rip), %rsi
+	call w_str
+	movq %r15, %rax				# per mille, then "x.y"
+	imulq $1000, %rax, %rax
+	xorl %edx, %edx
+	divq %r13
+	xorl %edx, %edx
+	movl $10, %ecx
+	divq %rcx
+	movq %rdx, %r15
+	movq %rax, %rdi
+	call w_dec
+	movb $'.', %al
+	call w_byte
+	movq %r15, %rdi
+	call w_dec
+	leaq s_hb5(%rip), %rsi
+	call w_str
+	movq stat_faults(%rip), %rdi
+	call w_dec
+	leaq s_hb6(%rip), %rsi
+	call w_str
+	movq stat_wb_lines(%rip), %rdi
+	call w_dec
+	leaq s_hb7(%rip), %rsi
+	call w_str
+	testq %r12, %r12
+	jz 1f
+	movq %r12, %rsi
+	call w_str
+1:	movl $2, %edi
+	call l_end
+	movq %rbx, hb_last(%rip)
+	movq stat_regions(%rip), %rax
+	movq %rax, hb_regions(%rip)
+	movq stat_region_ns(%rip), %rax
+	movq %rax, hb_rns(%rip)
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret

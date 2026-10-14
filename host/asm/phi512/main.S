@@ -70,6 +70,9 @@ phi512_init:
 	leaq s_t1(%rip), %rsi
 	call say
 11:
+	call now_ns				# the progress line's clock (region.S heartbeat)
+	movq %rax, hb_t0(%rip)
+	movq %rax, hb_last(%rip)
 	# where the YMM halves lie in an XSAVE area: CPUID 0xD, subleaf 2, EBX
 	movl $0xd, %eax
 	movl $2, %ecx
