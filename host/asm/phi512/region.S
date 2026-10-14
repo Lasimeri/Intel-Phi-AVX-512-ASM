@@ -341,6 +341,15 @@ region_run:
 	je 1f
 	cmpl $X_SYSCALL, %eax
 	je 1f
+	pushq %rax
+	pushq %rax
+	movq 56(%rsp), %rdi			# (two pushes: 40(%rsp) is 56 now) the exit rip
+	movq %r15, %rsi				# the aux
+	movq 40(%rsp), %rdx			# the signal word (24(%rsp) before the pushes)
+	movl %eax, %ecx
+	call rg_report_exit
+	popq %rax
+	popq %rax
 	addl $1000, %eax
 	jmp .Lrg_out
 1:	call wu_writeback
@@ -2196,6 +2205,74 @@ wu_writeback_card:
 	jmp 1b
 9:	addq %r15, stat_wb_lines(%rip)
 	movq %r15, %rax
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# rg_report_exit(exit rip rdi, aux rsi, signal word rdx, kind ecx): a
+# region that left the card in a way the host cannot go on from (a
+# refusal, a fault it cannot serve) said with the card's own numbers,
+# always: the kind, the rip and, when the rip is in a blob on card 0,
+# that blob's function and offset (a callee an in-card call entered
+# shows as itself), the aux and the signal | code. The failure line
+# sigill.S prints after it reads the slot's reply, which other requests
+# may have reused.
+	.section .rodata
+s_rx1:	.asciz "phi512: region left the card with exit kind "
+s_rx2:	.asciz " at rip "
+s_rx3:	.asciz " ("
+s_rx4:	.asciz " +"
+s_rx5:	.asciz "), aux "
+s_rx6:	.asciz ", signal|code "
+	.text
+rg_report_exit:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	movl %ecx, %r14d
+	call l_begin
+	leaq s_rx1(%rip), %rsi
+	call w_str
+	movl %r14d, %edi
+	call w_dec
+	leaq s_rx2(%rip), %rsi
+	call w_str
+	movq %rbx, %rdi
+	call w_hexn
+	movq %rbx, %rdi
+	call blob_at
+	testq %rax, %rax
+	jz 1f
+	movq %rax, %r15
+	pushq %rdx
+	pushq %rdx
+	leaq s_rx3(%rip), %rsi
+	call w_str
+	movq SD_NAME(%r15), %rsi
+	call w_str
+	leaq s_rx4(%rip), %rsi
+	call w_str
+	popq %rdi
+	popq %rdi
+	call w_hexn
+1:	leaq s_rx5(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	call w_hexn
+	leaq s_rx6(%rip), %rsi
+	call w_str
+	movq %r13, %rdi
+	call w_hexn
+	movl $2, %edi
+	call l_end
 	popq %r15
 	popq %r14
 	popq %r13

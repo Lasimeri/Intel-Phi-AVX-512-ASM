@@ -374,7 +374,58 @@ em_mvex:
 # kortest 98).
 	.globl em_vexk
 em_vexk:
-	pushq %rbx
+	# kmov between a mask and r8..r15: the card takes no VEX.R or VEX.B
+	# for the general register there (#UD, measured on card 0 2026-10-14:
+	# kmovw %k0,%r9d in ggml_compute_forward_add_non_quantized); through
+	# eax instead, rax saved by the recipe (em_rax)
+	cmpl $0x92, %esi
+	jne 10f
+	cmpl $8, %ecx
+	jb 11f
+	pushq %rbx				# kmov k, rN: mov eax, rN (41 8B C0+n); kmov k, eax
+	pushq %r12
+	movl %edx, %ebx
+	movl %ecx, %r12d
+	call em_rax
+	movl $0x41, %eax
+	call em_byte
+	movl $0x8b, %eax
+	call em_byte
+	movl %r12d, %eax
+	andl $7, %eax
+	orl $0xc0, %eax
+	call em_byte
+	movl $0x92, %esi
+	movl %ebx, %edx
+	xorl %ecx, %ecx
+	popq %r12
+	popq %rbx
+	jmp 11f
+10:	cmpl $0x93, %esi
+	jne 11f
+	cmpl $8, %edx
+	jb 11f
+	pushq %rbx				# kmov rN, k: kmov eax, k; mov rN, eax (41 89 C0+n)
+	pushq %r12
+	movl %edx, %ebx
+	movl %ecx, %r12d
+	call em_rax
+	movl $0x93, %esi
+	xorl %edx, %edx
+	movl %r12d, %ecx
+	call 11f
+	movl $0x41, %eax
+	call em_byte
+	movl $0x89, %eax
+	call em_byte
+	movl %ebx, %eax
+	andl $7, %eax
+	orl $0xc0, %eax
+	call em_byte
+	popq %r12
+	popq %rbx
+	ret
+11:	pushq %rbx
 	pushq %r12
 	pushq %r13
 	movl %esi, %ebx

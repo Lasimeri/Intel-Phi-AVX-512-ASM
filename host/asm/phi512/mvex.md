@@ -30,3 +30,16 @@ threads' TLS block).
 emit must be read again after it (the SIB's index was a garbage
 register for every indexed operand until this was). A form record is 24
 bytes: the two shorts after the quad and two longs are padded.
+
+## kmov with r8..r15 (2026-10-14)
+
+The card raises #UD on `kmovw` between a mask register and r8..r15 (the
+VEX.R/VEX.B extension of the general register): measured on card 0,
+`kmovw %k0,%eax` and `%k1,%eax` run, `%k0,%r9d` and `%k1,%r9d` do not.
+llama-server died on it (`kmovw %k0,%r9d` in
+`ggml_compute_forward_add_non_quantized`, its first compute). `em_vexk`
+now routes those through eax: `mov eax, rN` (41 8B C0+n) then `kmov k,
+eax`, or `kmov eax, k` then `mov rN, eax` (41 89 C0+n), rax saved by
+the recipe (`em_rax`). Checked on the card: k0/k1 to r9d and r15d and
+back to a mask, the sums right. Multi-byte NOPs (0F 1F) run on the card
+as they are (measured the same day).
