@@ -500,7 +500,8 @@ blob_build:
 # A direct call (inside the object or into the PLT): X_CALL at the call
 # site, the callee as the aux.
 .Lcall:
-	movq IX_TGT(%r14), %rax
+	movq IX_TGT(%r14), %rdi
+	call plt_resolve				# through a PLT stub: the function it reaches (the card's table holds functions)
 	movl $S_XFER, %ecx
 	call .Lseq_slot
 	call .Lsite_slot
@@ -1238,3 +1239,38 @@ lazy_host_ok:
 blob_lazy_n:	.skip 8			# the lazy sites of the last blob_build (blob_lazy holds the first LAZY_MAX)
 blob_lazy:	.skip LAZY_MAX * 16
 	.text
+
+# plt_resolve(address rdi): a call target that is a PLT stub (jmp
+# *GOT(%rip), after an endbr64 and a bnd prefix or not) with its GOT slot
+# resolved: the function the slot holds, in rax; else the address as it
+# is (an unresolved lazy slot still points into its stub). Calls between
+# a library's own exported functions go through its PLT
+# (gated_delta_net -> ggml_vec_dot_f32@plt in libggml-cpu), and the
+# card's in-card call table holds functions, not stubs: every such call
+# missed (2026-10-14). The host still calls through the stub (the exit's
+# site); the trampoline calls the resolved function, the same one.
+	.text
+	.globl plt_resolve
+plt_resolve:
+	movq %rdi, %rax
+	movq %rdi, %rcx
+	cmpl $0xfa1e0ff3, (%rcx)		# endbr64
+	jne 1f
+	addq $4, %rcx
+	cmpb $0xf2, (%rcx)			# bnd
+	jne 1f
+	incq %rcx
+1:	cmpw $0x25ff, (%rcx)			# ff 25: jmp *disp32(%rip)
+	jne 9f
+	movslq 2(%rcx), %rdx
+	leaq 6(%rcx,%rdx), %rdx			# the GOT slot
+	movq (%rdx), %rdx
+	testq %rdx, %rdx
+	jz 9f
+	cmpq %rdi, %rdx				# still inside the stub: unresolved
+	jb 2f
+	leaq 32(%rdi), %r8
+	cmpq %r8, %rdx
+	jb 9f
+2:	movq %rdx, %rax
+9:	ret

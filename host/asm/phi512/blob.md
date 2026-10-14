@@ -81,3 +81,15 @@ site slots and its `X_CALL` exit: `S_RETA` = the host return address
 the exit). A `ret` pops into `S_SITE` and jumps to `*%fs:S_INRET` (the
 card's `fx_inret`). See [`../../../card/vpu/fexec.md`](../../../card/vpu/fexec.md).
 `PHI512_INCALL=0` (main.S `incall_off`) keeps the old sequences.
+
+## Calls through a PLT stub (2026-10-14)
+
+A library's calls to its own exported functions go through its PLT
+(libggml-cpu is lazily bound: `call ggml_vec_dot_f32@plt`, a stub of `jmp
+*GOT(%rip)`, `push`, `jmp PLT0`). The card's in-card call table holds
+functions, so every such call missed and the region left the card
+(llama-server: `gated_delta_net` and `vec_dot_f32` regions 1:1).
+`plt_resolve` looks at a direct call's target: a stub (optional `endbr64`,
+optional `bnd`, then `ff 25 disp32`) whose GOT slot is resolved (not
+pointing back into the stub) gives the function in the slot as `S_XFER`.
+The host's own call at the site still goes through the stub.
