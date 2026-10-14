@@ -241,7 +241,28 @@ fexec_load:
 	movq %rdx, %r13
 	movq SL_ENTRY(%rbx), %r14		# bytes
 	testq %r14, %r14
+	jnz 5f
+	# no bytes and a key in fill_off: an alias of a loaded blob for the
+	# in-card call table (a PLT stub the host saw resolve to it, 2026-10-14)
+	movq SL_FILL_OFF(%rbx), %rdi
+	testq %rdi, %rdi
 	jz .Lfl_request
+	leaq fx_tab(%rip), %rcx
+	xorl %edx, %edx
+6:	cmpq fx_ntab(%rip), %rdx
+	jae .Lfl_request
+	movq SL_FN_ID(%rbx), %rax
+	cmpq FT_ID(%rcx), %rax
+	je 7f
+	addq $FT_BYTES, %rcx
+	incq %rdx
+	jmp 6b
+7:	movq FT_ADDR(%rcx), %rsi
+	addq SL_FILL_LEN(%rbx), %rsi
+	call fn_insert
+	xorl %eax, %eax
+	jmp 9f
+5:
 	cmpq $FX_LOAD_PER_SLOT, %r14
 	ja .Lfl_request
 	# round to a line; room in the arena

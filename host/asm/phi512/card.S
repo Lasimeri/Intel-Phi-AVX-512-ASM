@@ -863,3 +863,37 @@ c0_victim:
 	popq %r12
 	popq %rbx
 	ret
+
+# card_alias(card rdi, seed index rsi, key rdx, entry offset rcx): K_LOAD
+# with no bytes and the key in fill_off: the card's in-card call table
+# gets key -> the seed's loaded blob + offset (a PLT stub that resolved to
+# a function the card holds: region.S alias_check). eax 0 or the status.
+	.globl card_alias
+card_alias:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	movq %rcx, %r14
+	call card_clear_request
+	movq CD_SLOTP(%rbx), %rdi
+	leaq 1(%r12), %rax
+	movq %rax, SL_FN_ID(%rdi)
+	movq $0, SL_ENTRY(%rdi)
+	movq %r13, SL_FILL_OFF(%rdi)
+	movq %r14, SL_FILL_LEN(%rdi)
+	movq %rbx, %rdi
+	movl $K_LOAD, %esi
+	call card_post
+	movq %rbx, %rdi
+	call card_wait
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret

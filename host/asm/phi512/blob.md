@@ -93,3 +93,12 @@ functions, so every such call missed and the region left the card
 optional `bnd`, then `ff 25 disp32`) whose GOT slot is resolved (not
 pointing back into the stub) gives the function in the slot as `S_XFER`.
 The host's own call at the site still goes through the stub.
+
+A blob built before the slot resolved keeps the stub (lazy binding: a
+caller with its own AVX-512 code is translated at its first instruction,
+before its first call of the callee). Then the host aliases at run time:
+`region.S alias_check`, at every `X_CALL` exit, resolves the callee; a
+stub that now reaches a function with a blob is registered on every card
+as that blob's (`card.S card_alias`: `K_LOAD` with no bytes and the key in
+`fill_off`; card `fexec.S` inserts it in the in-card call table), once per
+stub.

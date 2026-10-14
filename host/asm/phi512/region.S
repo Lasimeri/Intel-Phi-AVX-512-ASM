@@ -444,6 +444,8 @@ region_run:
 	jmp 79f
 76:	cmpl $X_CALL, 16(%rsp)
 	jne 79f
+	movq exit_aux(%rip), %rdi		# a PLT stub that now resolves to a function the card holds: an alias on the cards
+	call alias_check
 	movq %r12, %rdi				# a call of plain code: it runs on the host, its return comes back here
 	movq exit_aux(%rip), %rsi
 	call tramp_setup
@@ -2693,4 +2695,74 @@ cont_obj_ok:
 1:	movl $1, %eax
 	ret
 8:	xorl %eax, %eax
+	ret
+
+# alias_check(callee rdi): a call that left the card for a PLT stub whose
+# GOT slot has resolved (since the caller's blob was built: plt_resolve
+# then saw it unresolved) to a function with a blob: the stub's address
+# registered on every card as that blob's (card_alias), once per stub, so
+# the next call stays on the card. exit_aux becomes the function (the
+# trampoline then calls it directly). 2026-10-14: gated_delta_net was
+# translated before its first vec_dot_f32 call bound the slot.
+	.set AL_MAX, 1024
+	.bss
+	.balign 8
+	.globl stat_alias
+al_tab:		.skip AL_MAX * 8
+al_n:		.skip 8
+stat_alias:	.skip 8
+	.text
+alias_check:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movq %rdi, %rbx
+	call plt_resolve
+	cmpq %rbx, %rax
+	je 9f
+	movq %rax, %r12				# the function
+	leaq al_tab(%rip), %rcx			# seen already?
+	xorl %edx, %edx
+1:	cmpq al_n(%rip), %rdx
+	jae 2f
+	cmpq (%rcx,%rdx,8), %rbx
+	je 8f
+	incq %rdx
+	jmp 1b
+2:	cmpq $AL_MAX, %rdx
+	jae 8f
+	movq %rbx, (%rcx,%rdx,8)
+	incq al_n(%rip)
+	movq %r12, %rdi
+	call blob_seed_at
+	testq %rax, %rax
+	jz 8f
+	movq %rdx, %r14				# the entry's offset
+	movq %rax, %rdi
+	call seed_index_of
+	movq %rax, %r13
+	xorl %ecx, %ecx				# every card
+3:	cmpq ncards(%rip), %rcx
+	jae 4f
+	pushq %rcx
+	pushq %rcx
+	movq %rcx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rax
+	addq %rax, %rdi
+	movq %r13, %rsi
+	movq %rbx, %rdx
+	movq %r14, %rcx
+	call card_alias
+	popq %rcx
+	popq %rcx
+	incq %rcx
+	jmp 3b
+4:	incq stat_alias(%rip)
+8:	movq %r12, exit_aux(%rip)		# the trampoline calls the function itself
+9:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
 	ret
