@@ -969,61 +969,23 @@ wu_writeback:
 	cmpl $8, %ecx
 	jb 4b
 	jmp 5f
-41:	# changed: the bytes the card changed, alone, to memory and the shadow
-	# (2026-10-14: the whole line was copied, and another thread's writes
-	# to the line during the region were undone)
+41:	# changed: the bytes the card changed, alone, to the program and the
+	# shadow, through /proc/self/mem (wb_line_apply): a page another thread
+	# unmapped meanwhile fails there instead of faulting the host
+	# (2026-10-14: an HTTP thread's region faulted reading a line above its
+	# stack); a whole line copied had also undone other threads' writes
 	leaq (%r9,%r10), %r11
 	movq WU_ADDR(%rbx), %rdi
 	addq %r11, %rdi
-	# (probe) a conflict: memory no longer the shadow (the snapshot the card
-	# started from) in a line the card changed: written meanwhile by
-	# another thread
-	xorl %ecx, %ecx
-44:	movq (%rdi,%rcx), %rax
-	leaq (%rdx,%r11), %r8
-	cmpq (%r8,%rcx), %rax
-	jne 45f
-	addq $8, %rcx
-	cmpl $64, %ecx
-	jb 44b
-	jmp 46f
-45:	incq stat_wb_conflicts(%rip)
-	cmpq $0, verbose(%rip)
-	je 46f
-	pushq %rdx
-	pushq %rdi
+	leaq (%r13,%r11), %rsi
+	addq %r11, %rdx
 	pushq %r9
 	pushq %r10
-	pushq %r11
-	pushq %r11
-	leaq (%rdx,%r11), %rsi
-	leaq (%r13,%r11), %rdx
-	call wb_conflict_print
-	popq %r11
-	popq %r11
+	call wb_line_apply
 	popq %r10
 	popq %r9
-	popq %rdi
-	popq %rdx
-46:	xorl %ecx, %ecx
-42:	movq (%r13,%r11), %rax
-	cmpq (%rdx,%r11), %rax
-	je 47f
-	xorl %r8d, %r8d
-48:	leaq (%r11,%r8), %rsi
-	movb (%r13,%rsi), %al
-	cmpb (%rdx,%rsi), %al
-	je 49f
-	movb %al, (%rdx,%rsi)			# the shadow's byte
-	leaq (%rdi,%rcx), %rsi
-	movb %al, (%rsi,%r8)			# the program's byte
-49:	incl %r8d
-	cmpl $8, %r8d
-	jb 48b
-47:	addq $8, %r11
-	addq $8, %rcx
-	cmpl $64, %ecx
-	jb 42b
+	testl %eax, %eax
+	jz 5f
 	incq %r15
 	cmpq $0, verbose(%rip)
 	je 5f
@@ -1584,54 +1546,6 @@ hw_reported:	.skip 8
 	.text
 
 	.text
-# wb_conflict_print(memory line rdi, shadow line rsi, card line rdx): a
-# probe line for a write-back conflict: the words where memory is no
-# longer the shadow, with the card's.
-wb_conflict_print:
-	pushq %rbx
-	pushq %r12
-	pushq %r13
-	pushq %r14
-	subq $8, %rsp
-	movq %rdi, %rbx
-	movq %rsi, %r12
-	movq %rdx, %r13
-	call l_begin
-	leaq s_wc1(%rip), %rsi
-	call w_str
-	movq %rbx, %rdi
-	call w_hexn
-	xorl %r14d, %r14d
-1:	movq (%rbx,%r14,8), %rax
-	cmpq (%r12,%r14,8), %rax
-	je 2f
-	leaq s_wc2(%rip), %rsi
-	call w_str
-	movq %r14, %rdi
-	call w_dec
-	leaq s_wc3(%rip), %rsi
-	call w_str
-	movq (%rbx,%r14,8), %rdi
-	call w_hexn
-	leaq s_wc4(%rip), %rsi
-	call w_str
-	movq (%r12,%r14,8), %rdi
-	call w_hexn
-	leaq s_wc5(%rip), %rsi
-	call w_str
-	movq (%r13,%r14,8), %rdi
-	call w_hexn
-2:	incl %r14d
-	cmpl $8, %r14d
-	jb 1b
-	movl $2, %edi
-	call l_end
-	addq $8, %rsp
-	popq %r14
-	popq %r13
-	popq %r12
-	popq %rbx
-	ret
 
 # wu_shadows_from_stage(chunk rdi, units esi, the staging slot's bytes
 # rdx): every unit of the mask that the region path tracks gets its
@@ -1685,4 +1599,166 @@ s_wc5:	.asciz " card "
 	.balign 8
 	.globl stat_wb_conflicts
 stat_wb_conflicts:	.skip 8
+	.text
+
+	.text
+	.set SYS_pwrite64, 18
+# wb_line_apply(the line's address rdi, the card's line rsi, the shadow's
+# line rdx): the bytes where the card differs from the shadow written into
+# the program, run by run, by pwrite on /proc/self/mem, and into the
+# shadow. The program's line is read first (pread): unreadable now
+# (another thread unmapped it during the region) -> nothing written, eax
+# 0; where it no longer matches the shadow, a write-back conflict is
+# counted (and printed under verbose). eax 1 when the line was taken.
+wb_line_apply:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	call mem_wfd_get
+	testl %eax, %eax
+	js 8f
+	movl %eax, %r15d			# the fd
+	movl %r15d, %edi
+	leaq wb_cur(%rip), %rsi
+	movl $64, %edx
+	movq %rbx, %r10
+	movl $SYS_pread64, %eax
+	syscall
+	cmpq $64, %rax
+	jne 8f
+	# (probe) a conflict: the program's line no longer the shadow
+	xorl %ecx, %ecx
+1:	leaq wb_cur(%rip), %rax
+	movq (%rax,%rcx), %rax
+	cmpq (%r13,%rcx), %rax
+	jne 2f
+	addq $8, %rcx
+	cmpl $64, %ecx
+	jb 1b
+	jmp 3f
+2:	incq stat_wb_conflicts(%rip)
+	cmpq $0, verbose(%rip)
+	je 3f
+	leaq wb_cur(%rip), %rdi
+	movq %r13, %rsi
+	movq %r12, %rdx
+	movq %rbx, %rcx
+	call wb_conflict_print
+3:	# the runs of changed bytes
+	xorl %r14d, %r14d			# the byte
+4:	cmpl $64, %r14d
+	jae 7f
+	movzbl (%r12,%r14), %eax
+	cmpb (%r13,%r14), %al
+	jne 5f
+	incl %r14d
+	jmp 4b
+5:	movl %r14d, %ecx			# the run's start
+6:	movzbl (%r12,%r14), %eax
+	cmpb (%r13,%r14), %al
+	je 61f
+	movb %al, (%r13,%r14)			# the shadow's byte
+	incl %r14d
+	cmpl $64, %r14d
+	jb 6b
+61:	pushq %rcx
+	pushq %rcx
+	movl %r15d, %edi
+	leaq (%r12,%rcx), %rsi			# the card's bytes
+	movl %r14d, %edx
+	subl %ecx, %edx				# the run's length
+	leaq (%rbx,%rcx), %r10			# at the program's address
+	movl $SYS_pwrite64, %eax
+	syscall
+	popq %rcx
+	popq %rcx
+	jmp 4b
+7:	movl $1, %eax
+	jmp 9f
+8:	xorl %eax, %eax
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# mem_wfd_get: /proc/self/mem opened read-write once (the write-back's);
+# eax the fd, negative when it cannot be opened.
+mem_wfd_get:
+	movq mem_wfd(%rip), %rax
+	testq %rax, %rax
+	jnz 1f
+	leaq s_procmem(%rip), %rdi
+	movl $O_RDWR | O_CLOEXEC, %esi
+	xorl %edx, %edx
+	movl $SYS_open, %eax
+	syscall
+	testq %rax, %rax
+	js 2f
+	incq %rax				# stored + 1: 0 means not open
+	movq %rax, mem_wfd(%rip)
+1:	decq %rax
+2:	ret
+
+# wb_conflict_print(memory words rdi, shadow rsi, card rdx, the line's
+# address rcx): a probe line for a write-back conflict: the words where
+# memory is no longer the shadow, with the card's.
+wb_conflict_print:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	movq %rcx, %r15
+	call l_begin
+	leaq s_wc1(%rip), %rsi
+	call w_str
+	movq %r15, %rdi
+	call w_hexn
+	xorl %r14d, %r14d
+1:	movq (%rbx,%r14,8), %rax
+	cmpq (%r12,%r14,8), %rax
+	je 2f
+	leaq s_wc2(%rip), %rsi
+	call w_str
+	movq %r14, %rdi
+	call w_dec
+	leaq s_wc3(%rip), %rsi
+	call w_str
+	movq (%rbx,%r14,8), %rdi
+	call w_hexn
+	leaq s_wc4(%rip), %rsi
+	call w_str
+	movq (%r12,%r14,8), %rdi
+	call w_hexn
+	leaq s_wc5(%rip), %rsi
+	call w_str
+	movq (%r13,%r14,8), %rdi
+	call w_hexn
+2:	incl %r14d
+	cmpl $8, %r14d
+	jb 1b
+	movl $2, %edi
+	call l_end
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+s_procmem:	.asciz "/proc/self/mem"
+	.bss
+	.balign 64
+wb_cur:		.skip 64			# the program's line as wb_line_apply read it
+mem_wfd:	.skip 8				# /proc/self/mem read-write, fd + 1 (0: not open)
 	.text

@@ -40,3 +40,17 @@ suite's expected arrays), hence `EM_KVAL`; and after the suite's
 unmapped page, because a unit's page bitmap was computed once at
 residency: [`region.S`](region.md) now takes `copy_mapped_pages` from
 every [`copy_mapped`](elf.md).
+
+## Broadcasts and block loads through the slot (2026-10-14)
+
+The card wants a broadcast's memory operand (`vbroadcastss`/`sd`,
+`em_broadcast`) aligned to its element and a block load
+(`vbroadcasti32x4`/`64x4`, `em_load_block`) aligned to its 16 or 32
+bytes; x86 wants neither. `em_copy_to_xfer` copies the operand's 4, 8,
+16 or 32 bytes by scalar moves into the transfer slot's upper half
+(`XFER_HI`, `S_XFER` + 32: `xl_divs` keeps the first 16 bytes across
+its memory broadcast) and both read the aligned slot. A VEX `vmovq` from
+a 4-aligned address (a broadcast under lane 0) in
+`llama_memory_hybrid_idx`'s constructor raised #GP on the card at the
+first context of `llama-server`. The narrow suite checks the five
+cases; with the change stashed it stops with #GP at the first.

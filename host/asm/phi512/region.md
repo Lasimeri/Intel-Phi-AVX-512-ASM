@@ -91,7 +91,11 @@ decoding a blob against the register probes.
 
 A line the card changed goes back byte by byte: only the bytes where
 the card's copy differs from the shadow are written into the program
-and the shadow. `llama-server` has more threads than the one in a
+and the shadow, run by run, through `/proc/self/mem` (`wb_line_apply`:
+the line is read with `pread`, each run written with `pwrite`), never by
+the host's own loads and stores: a page another thread unmapped during
+the region fails the call instead of faulting the host (an HTTP
+thread's region read a line above its stack that was gone, 2026-10-14). `llama-server` has more threads than the one in a
 region (`common_log`'s worker, 130 in all at model loading); a whole
 line copied back undid what another thread wrote to the same line
 during the region, and glibc stopped on "corrupted double-linked list"

@@ -948,7 +948,24 @@ em_broadcast:
 	movl %edx, %r12d
 	movq %rcx, %r13
 	movl %r8d, %r14d
-	movl %r9d, %ecx
+	cmpl $RM_MEM, %r12d
+	jne 1f
+	# the element through the transfer slot (em_copy_to_xfer: the card wants
+	# a broadcast's memory operand aligned to the element)
+	pushq %r9
+	pushq %r9
+	movq %r15, %rdi
+	movq %r13, %rsi
+	movl $4, %edx
+	testl %r9d, %r9d
+	jz 2f
+	movl $8, %edx
+2:	call em_copy_to_xfer
+	popq %r9
+	popq %r9
+	movl $RM_FS, %r12d
+	movl $XFER_HI, %r13d
+1:	movl %r9d, %ecx
 	movl $0x18, %r8d
 	orl %ecx, %r8d
 	movq %rsp, %rdi
@@ -988,7 +1005,24 @@ em_load_block:
 	movl %edx, %r12d
 	movq %rcx, %r13
 	movl %r8d, %r14d
-	movl %r9d, %ecx
+	cmpl $RM_MEM, %r12d
+	jne 1f
+	# the block through the transfer slot (the card wants it aligned to
+	# its 16 or 32 bytes)
+	pushq %r9
+	pushq %r9
+	movq %r15, %rdi
+	movq %r13, %rsi
+	movl $16, %edx
+	testl %r9d, %r9d
+	jz 2f
+	movl $32, %edx
+2:	call em_copy_to_xfer
+	popq %r9
+	popq %r9
+	movl $RM_FS, %r12d
+	movl $XFER_HI, %r13d
+1:	movl %r9d, %ecx
 	movl $0x5a, %r8d
 	orl %ecx, %r8d
 	movq %rsp, %rdi

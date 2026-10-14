@@ -457,6 +457,7 @@ card_resident_post:
 	popq %r9
 	popq %r8
 	# the region path's shadows from these very bytes (one snapshot)
+	pushq %rax				# (copy_mapped's count, for the fill probe)
 	pushq %r8
 	pushq %r9
 	movq %r12, %rdi
@@ -468,6 +469,7 @@ card_resident_post:
 	call wu_shadows_from_stage
 	popq %r9
 	popq %r8
+	popq %rax
 	movq %r15, fill_last_slot(%rip)		# (a probe: the last fill's staging slot, offset and bytes)
 	movq %r8, fill_last_off(%rip)
 	movq %r9, fill_last_len(%rip)

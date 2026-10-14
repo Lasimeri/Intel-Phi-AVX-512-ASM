@@ -57,7 +57,15 @@ two lanes of a result silently lost: a chunk kept mapped and writable
 from a ranges-mode region gave a later demand-mode region stale reads
 and unsnapshotted writes (`card/vpu/vpu_exec.md`).
 
-## Added 2026-10-14 (69 checks)
+## Added 2026-10-14 (74 checks)
+
+Section 30: `vinserti32x4` from an 8-aligned address, `vmovq` from a
+4-aligned one (VEX and EVEX), `vbroadcastsd` from a 4-aligned and
+`vbroadcastss` from a 2-aligned address: the card faults on such
+operands unless they go through the aligned slot
+([`mvex2.md`](../host/asm/phi512/mvex2.md)); without that change the
+run stops with #GP at the first of them (69 ok).
+
 
 `vpinsrq $1, rax` in its EVEX and VEX forms and `vcvtusi2sd eax` with
 rax's upper half set: the recipes read rax after their own mask had

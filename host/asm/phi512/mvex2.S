@@ -502,3 +502,86 @@ em_unaligned_any:
 .Lb2_jz32:	.byte 0x0f, 0x84, 0, 0, 0, 0
 .Lb2_jmp32:	.byte 0xe9, 0, 0, 0, 0
 	.text
+
+	.text
+	.set XFER_HI, S_XFER + 32		# the transfer slot's upper half: em_copy_to_xfer's (xl_divs keeps [S_XFER, +16))
+# em_copy_to_xfer(em rdi, in rsi, bytes edx: 4, 8, 16 or 32): the
+# decoded instruction's memory operand copied to [fs:XFER_HI] by scalar
+# moves (rax and rcx saved, the program's address registers reloaded,
+# lea rcx, [m]; mov rax/eax, [rcx + off]; mov [fs:XFER_HI + off]): a
+# broadcast (em_broadcast) or a block load (em_load_block) then reads
+# the aligned slot. The card requires their memory operand aligned to
+# the element or the block; the program's need not be (vmovq at a
+# 4-aligned address, llama_memory_hybrid_idx's constructor: #GP on the
+# card, 2026-10-14).
+	.globl em_copy_to_xfer
+em_copy_to_xfer:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	subq $8, %rsp
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movl %edx, %r13d
+	movq %rbx, %rdi
+	call em_rax
+	movq %rbx, %rdi
+	call em_rcx
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	call em_addr_regs
+	movq %rbx, %rdi
+	movl $1, %esi
+	movq %r12, %rdx
+	call em_lea				# lea rcx, [m]
+	xorl %r14d, %r14d			# off
+1:	cmpl %r13d, %r14d
+	jae 9f
+	movl %r13d, %eax
+	subl %r14d, %eax
+	cmpl $8, %eax
+	jb 2f
+	movq %rbx, %rdi
+	movl $0x48, %eax
+	call em_byte
+	movq %rbx, %rdi
+	movl $0x8b, %eax			# mov rax, [rcx + off]
+	call em_byte
+	movq %rbx, %rdi
+	movl $0x41, %eax
+	call em_byte
+	movq %rbx, %rdi
+	movl %r14d, %eax
+	call em_byte
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	leal XFER_HI(%r14), %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:XFER_HI + off], rax
+	addl $8, %r14d
+	jmp 1b
+2:	movq %rbx, %rdi
+	movl $0x8b, %eax			# mov eax, [rcx + off]
+	call em_byte
+	movq %rbx, %rdi
+	movl $0x41, %eax
+	call em_byte
+	movq %rbx, %rdi
+	movl %r14d, %eax
+	call em_byte
+	movq %rbx, %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	leal XFER_HI(%r14), %ecx
+	movl $1, %r8d
+	call em_gpr_scratch			# mov [fs:XFER_HI + off], eax
+	addl $4, %r14d
+	jmp 1b
+9:	addq $8, %rsp
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret

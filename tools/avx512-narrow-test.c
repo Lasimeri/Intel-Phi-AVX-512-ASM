@@ -496,6 +496,37 @@ int main(void)
         check("vpermd ymm (3-bit indices)", &r, &w, 16);
     }
 
+
+    /* 30. broadcasts and 8-byte loads from addresses the card would not
+     * accept: a broadcast's memory operand must be aligned to its element
+     * (a block load to its block) on the card, never on x86 (2026-10-14:
+     * vmovq at a 4-aligned address in llama_memory_hybrid_idx's
+     * constructor raised #GP on the card). Each block starts with an
+     * EVEX move, so the card runs what follows. */
+    {
+        static uint8_t ub[128] __attribute__((aligned(64)));
+        for (int i = 0; i < 128; i++) ub[i] = (uint8_t)(0x31 * i + 7);
+        uint64_t q4; memcpy(&q4, ub + 4, 8);
+        uint32_t d2; memcpy(&d2, ub + 2, 4);
+        /* a 16-byte block (em_load_block) from an 8-aligned address, first:
+         * on the card it went to #GP like the broadcasts */
+        asm volatile("vmovups %1, %%zmm17\n\tvinserti32x4 $1, (%2), %%zmm17, %%zmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "r"(ub + 8) : "xmm16", "xmm17", "memory");
+        memcpy(&w, &a, sizeof w);
+        memcpy(&w.b[16], ub + 8, 16);
+        check("vinserti32x4 from an 8-aligned address", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm16\n\tvmovq (%2), %%xmm1\n\tvmovups %%zmm1, %0" : "=m"(r) : "m"(a), "r"(ub + 4) : "xmm1", "xmm16", "memory");
+        memset(&w, 0, sizeof w);
+        w.q[0] = q4;
+        check("vmovq m64 at a 4-aligned address (VEX)", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\t%{evex%} vmovq (%2), %%xmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "r"(ub + 4) : "xmm16", "xmm17", "memory");
+        check("vmovq m64 at a 4-aligned address (EVEX)", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\tvbroadcastsd (%2), %%zmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "r"(ub + 4) : "xmm16", "xmm17", "memory");
+        for (int i = 0; i < 8; i++) w.q[i] = q4;
+        check("vbroadcastsd from a 4-aligned address", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\tvbroadcastss (%2), %%zmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "r"(ub + 2) : "xmm16", "xmm17", "memory");
+        for (int i = 0; i < 16; i++) w.u[i] = d2;
+        check("vbroadcastss from a 2-aligned address", &r, &w, 16);
+    }
     if (fails) {
         printf("FAIL: %d check(s) wrong\n", fails);
         return 1;
