@@ -20,13 +20,15 @@
 	.include "defs.inc"
 	.include "xlate.inc"
 
-	.set WU_MAX, 1024
+	.set WU_MAX, 4096			# writable units (64 KiB each, a host shadow each: 256 MiB): llama-server's compute buffer alone is 164 MiB (2026-10-14, 1024 was overrun in the first decode)
 	.set STACK_SLACK, 262144		# how far below rsp - 128 a region may write its stack (on the alternate stack): 256 KiB since in-card calls (2026-10-14) put the callees' frames there
 	.set WU_ADDR, 0				# the unit's address
 	.set WU_SHADOW, 8			# its shadow (64 KiB)
 	.set WU_LO, 16				# the lowest address lines are written back from (the stack unit: below the frame's rsp is the handler's own)
 	.set WU_PAGES, 24			# u16: the readable 4 KiB pages (filled, refreshed, verified)
 	.set WU_WPAGES, 26			# u16: the writable ones (written back)
+	.set WU_TRK, 28				# u8: 1 when the kernel tracks its writes (dt_register)
+	.set WU_DIRTY, 30			# u16: the pages written since the last refresh (dt_scan)
 	.set WU_FLO, 32				# a range to refresh whole at the next region (the floor was lowered: the
 	.set WU_FHI, 40				# card may have written below the old floor, which the shadow never saw)
 	.set WU_BYTES, 48
@@ -647,6 +649,10 @@ wu_ensure:
 	movw %ax, WU_PAGES(%rbx)		# the readable pages only (a PROT_NONE page is in the maps but not writable)
 	movzwl copy_mapped_wpages(%rip), %eax
 	movw %ax, WU_WPAGES(%rbx)
+	movb $0, WU_TRK(%rbx)
+	movw $0xffff, WU_DIRTY(%rbx)
+	movq %rbx, %rdi
+	call dt_register				# its writes tracked by the kernel from now (the shadow just taken)
 	# the need on card 0: the chunk and the unit's bit, class 1 (written back)
 	xorl %edi, %edi
 	movq %r12, %rsi
@@ -767,6 +773,7 @@ wu_refresh:
 	call maps_ensure
 	movl ncards(%rip), %edi
 	call pool_start
+	call dt_scan_all				# the pages written since the last refresh, per unit
 	# phase 1 (card 0's workers and this thread): every unit read and
 	# compared, its changed lines into its shadow and its bitmap
 	xorl %edi, %edi
@@ -892,7 +899,14 @@ wu_refresh_unit:
 	movl $16, %ecx
 1:	movq %rax, -8(%r13,%rcx,8)
 	loop 1b
-	movq %r12, %rdi
+	cmpb $0, WU_TRK(%rbx)			# tracked, nothing written, nothing forced: nothing to read
+	je 11f
+	cmpw $0, WU_DIRTY(%rbx)
+	jne 11f
+	cmpq $0, WU_FHI(%rbx)
+	jne 11f
+	jmp 9f
+11:	movq %r12, %rdi
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call copy_mapped
@@ -2764,5 +2778,201 @@ alias_check:
 9:	popq %r14
 	popq %r13
 	popq %r12
+	popq %rbx
+	ret
+
+# Dirty tracking of the writable units (2026-10-14). The refresh read
+# every unit back through /proc/self/mem and compared it with its shadow
+# before every region: with llama-server's 164 MiB compute buffer in the
+# table that was ~62% of the main thread (wu_refresh + wu_refresh_unit,
+# perf during the first decode) and 100 regions/s. Now each unit is
+# registered with userfaultfd for write-protection in asynchronous mode
+# (UFFD_FEATURE_WP_ASYNC: the kernel resolves a write itself, no thread
+# waits) and PAGEMAP_SCAN with PM_SCAN_WP_MATCHING returns the pages
+# written since the last scan and protects them again in the same call;
+# a unit with none (and no forced range) is not read at all. A unit the
+# kernel will not register, or whose scan fails (unmapped and mapped
+# again: the registration went with the old mapping), keeps the full
+# compare. Rack kernel 7.2.9, vm.unprivileged_userfaultfd 0: user-mode
+# only. Constants from the rack's headers (/tmp/uffdk.c). PHI512_DIRTY=0
+# turns it off.
+	.set SYS_userfaultfd_n, 323
+	.set SYS_ioctl_n, 16
+	.set SYS_open_n, 2
+	.set UFFD_FLAGS, 0x80801		# O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY
+	.set UFFDIO_API_N, 0xc018aa3f
+	.set UFFDIO_REGISTER_N, 0xc020aa00
+	.set UFFD_API_V, 0xaa
+	.set UFFD_FEATURES, 0xa000		# WP_ASYNC 0x8000 | WP_UNPOPULATED 0x2000
+	.set PAGEMAP_SCAN_N, 0xc0606610
+	.bss
+	.balign 8
+	.globl dt_off, stat_dt_skip
+dt_off:		.skip 8			# PHI512_DIRTY=0 (main.S)
+dt_state:	.skip 8			# 0 untried, 1 on, 2 off
+dt_uffd:	.skip 8
+dt_pm:		.skip 8
+dt_api:		.skip 24
+dt_reg:		.skip 32
+dt_arg:		.skip 96
+dt_vec:		.skip 16 * 24
+stat_dt_skip:	.skip 8			# units the refresh did not read
+	.section .rodata
+s_pagemap:	.asciz "/proc/self/pagemap"
+s_dt_on:	.asciz "phi512: dirty tracking of the writable units on (userfaultfd WP async, PAGEMAP_SCAN)"
+s_dt_off:	.asciz "phi512: dirty tracking unavailable: every unit read back at each refresh"
+	.text
+# dt_init: the userfaultfd and the pagemap descriptor, once.
+dt_init:
+	movq $2, dt_state(%rip)
+	cmpq $0, dt_off(%rip)
+	jne 9f
+	movl $UFFD_FLAGS, %edi
+	movl $SYS_userfaultfd_n, %eax
+	syscall
+	testq %rax, %rax
+	js 8f
+	movq %rax, dt_uffd(%rip)
+	leaq dt_api(%rip), %rdx
+	movq $UFFD_API_V, 0(%rdx)
+	movq $UFFD_FEATURES, 8(%rdx)
+	movq $0, 16(%rdx)
+	movq %rax, %rdi
+	movl $UFFDIO_API_N, %esi
+	movl $SYS_ioctl_n, %eax
+	syscall
+	testq %rax, %rax
+	jnz 8f
+	leaq s_pagemap(%rip), %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	movl $SYS_open_n, %eax
+	syscall
+	testq %rax, %rax
+	js 8f
+	movq %rax, dt_pm(%rip)
+	movq $1, dt_state(%rip)
+	leaq s_dt_on(%rip), %rsi
+	jmp 7f
+8:	leaq s_dt_off(%rip), %rsi
+7:	pushq %rsi
+	pushq %rsi
+	call l_begin
+	popq %rsi
+	popq %rsi
+	call w_str
+	movl $2, %edi
+	call l_end
+9:	ret
+
+# dt_register(entry rdi): the unit registered for write-protection and
+# protected now; WU_TRK 1 when both took.
+dt_register:
+	cmpq $0, dt_state(%rip)
+	jne 1f
+	pushq %rdi
+	call dt_init
+	popq %rdi
+1:	cmpq $1, dt_state(%rip)
+	jne 9f
+	pushq %rbx
+	movq %rdi, %rbx
+	leaq dt_reg(%rip), %rdx
+	movq WU_ADDR(%rbx), %rax
+	movq %rax, 0(%rdx)
+	movq $UNIT, 8(%rdx)
+	movq $2, 16(%rdx)			# UFFDIO_REGISTER_MODE_WP
+	movq $0, 24(%rdx)
+	movq dt_uffd(%rip), %rdi
+	movl $UFFDIO_REGISTER_N, %esi
+	movl $SYS_ioctl_n, %eax
+	syscall
+	testq %rax, %rax
+	jnz 8f
+	movq %rbx, %rdi
+	call dt_scan				# every page protected (what it reports was taken by the shadow)
+	testl %eax, %eax
+	js 8f
+	movb $1, WU_TRK(%rbx)
+8:	popq %rbx
+9:	ret
+
+# dt_scan(entry rdi): eax the unit's pages written since the last scan (a
+# bit a page), now protected again; -1 when the scan failed.
+dt_scan:
+	pushq %rbx
+	movq %rdi, %rbx
+	leaq dt_arg(%rip), %rdx
+	movq $96, 0(%rdx)
+	movq $3, 8(%rdx)			# PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC
+	movq WU_ADDR(%rbx), %rax
+	movq %rax, 16(%rdx)
+	addq $UNIT, %rax
+	movq %rax, 24(%rdx)
+	movq $0, 32(%rdx)
+	leaq dt_vec(%rip), %rax
+	movq %rax, 40(%rdx)
+	movq $16, 48(%rdx)
+	movq $0, 56(%rdx)
+	movq $0, 64(%rdx)
+	movq $2, 72(%rdx)			# PAGE_IS_WRITTEN
+	movq $0, 80(%rdx)
+	movq $2, 88(%rdx)
+	movq dt_pm(%rip), %rdi
+	movl $PAGEMAP_SCAN_N, %esi
+	movl $SYS_ioctl_n, %eax
+	syscall
+	testq %rax, %rax
+	js 8f
+	movq %rax, %r8				# regions
+	xorl %eax, %eax				# the mask
+	leaq dt_vec(%rip), %r9
+1:	testq %r8, %r8
+	jz 9f
+	movq 0(%r9), %rcx			# start
+	movq 8(%r9), %rdx			# end
+2:	cmpq %rdx, %rcx
+	jae 3f
+	movq %rcx, %r10
+	subq WU_ADDR(%rbx), %r10
+	shrq $12, %r10
+	btsl %r10d, %eax
+	addq $4096, %rcx
+	jmp 2b
+3:	addq $24, %r9
+	decq %r8
+	jmp 1b
+8:	movl $-1, %eax
+9:	popq %rbx
+	ret
+
+# dt_scan_all: every tracked unit's written pages into WU_DIRTY (a failed
+# scan: the unit untracked from then on); an untracked unit all dirty.
+dt_scan_all:
+	pushq %rbx
+	pushq %r12
+	leaq wu_tab(%rip), %rbx
+	movq wu_n(%rip), %r12
+1:	testq %r12, %r12
+	jz 9f
+	cmpb $0, WU_TRK(%rbx)
+	je 3f
+	movq %rbx, %rdi
+	call dt_scan
+	testl %eax, %eax
+	js 2f
+	movw %ax, WU_DIRTY(%rbx)
+	testl %eax, %eax
+	jnz 4f
+	cmpq $0, WU_FHI(%rbx)
+	jne 4f
+	incq stat_dt_skip(%rip)
+	jmp 4f
+2:	movb $0, WU_TRK(%rbx)
+3:	movw $0xffff, WU_DIRTY(%rbx)
+4:	addq $WU_BYTES, %rbx
+	decq %r12
+	jmp 1b
+9:	popq %r12
 	popq %rbx
 	ret

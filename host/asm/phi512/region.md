@@ -232,3 +232,17 @@ function, three calls): 100 callee regions and 5 caller regions against
   5 s, each `fread` a round trip; still parsing the GGUF at 90 s against
   3.9 s). Card round trips pay off in the compute loops; glue with many
   plain calls stays on the host.
+
+## Dirty tracking of the writable units (2026-10-14)
+
+The refresh read every unit back through `/proc/self/mem` and compared it
+before every region; with llama-server's 164 MiB compute buffer in the
+table (`WU_MAX` now 4096) that was ~62% of the main thread. Each new unit
+is registered with userfaultfd for write-protection in asynchronous mode
+(`UFFD_FEATURE_WP_ASYNC | WP_UNPOPULATED`, user mode only) and protected
+at once; `dt_scan_all` before the refresh asks `PAGEMAP_SCAN`
+(`PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC`, `PAGE_IS_WRITTEN`) for each
+unit's pages written since and protects them again; `wu_refresh_unit`
+skips a unit with none (and no forced range) without reading it. A unit
+the kernel will not register, or whose scan fails, keeps the full
+compare. `PHI512_DIRTY=0` turns it off.
