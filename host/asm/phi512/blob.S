@@ -128,7 +128,18 @@ blob_build:
 # A copied instruction: an x87 one and a legacy SSE one are refused for
 # now; a rip-relative operand is re-based.
 .Lcopy:
-	leaq F_IN(%rsp), %rdx
+	# endbr64 and endbr32 (F3 0F 1E FA, FB): no-ops without CET, #UD on
+	# the card (KNC predates them): dropped. glibc's libm starts every
+	# function with one; its functions, sized from the unwind index, are
+	# translated as callees (2026-10-14: expf's blob refused at +0)
+	cmpb $4, IX_LEN(%r14)
+	jne 16f
+	movl IX_OFF(%r14), %eax
+	movl (%r13,%rax), %eax
+	andl $0xfeffffff, %eax
+	cmpl $0xfa1e0ff3, %eax
+	je .Ladvance
+16:	leaq F_IN(%rsp), %rdx
 	# an atomic on the program's memory (a lock prefix; xchg with memory,
 	# locked without one) is the host's: on the card it would be atomic on
 	# the card's copy alone, and the program's other threads would lose

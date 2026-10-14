@@ -35,6 +35,7 @@
 exe_map:	.skip 8			# the executable's file, mapped whole
 exe_len:	.skip 8
 exe_base:	.skip 8			# where the executable is loaded
+	.globl maps_buf
 maps_buf:	.skip MAPS_CAP
 stat_buf:	.skip STAT_BYTES
 mem_fd:	.skip 8			# /proc/self/mem, opened at the first copy
@@ -103,7 +104,9 @@ elf_init:
 	popq %rbx
 	ret
 
-# parse_hex: the hexadecimal number at rsi, in rax; rsi past it.
+# parse_hex: the hexadecimal number at rsi, in rax; rsi past it (rcx
+# clobbered).
+	.globl parse_hex
 parse_hex:
 	xorl %eax, %eax
 1:	movzbl (%rsi), %ecx
@@ -385,7 +388,25 @@ elf_func_at:
 	jmp 8f
 5:	addq $ST_BYTES, %rdx
 	jmp 3b
-9:	xorl %eax, %eax
+9:	# no symbol: the unwind index (eh_func_at), the name made up
+	movq (%rsp), %rdi
+	testq %rdi, %rdi
+	jz 91f
+	movq %r15, %rsi
+	call eh_func_at
+	testq %rax, %rax
+	jz 91f
+	pushq %rax
+	pushq %rdx
+	movq 16(%rsp), %rdi
+	movq %rax, %rsi
+	call eh_name
+	movq %rax, %rcx
+	popq %rdx
+	popq %rax
+	testq %rcx, %rcx
+	jnz 8f
+91:	xorl %eax, %eax
 	xorl %edx, %edx
 	xorl %ecx, %ecx
 8:	addq $8, %rsp
@@ -394,6 +415,164 @@ elf_func_at:
 	popq %r13
 	popq %r12
 	popq %rbx
+	ret
+
+# eh_func_at(object entry rdi, offset in the object rsi): the function
+# holding the offset, from the object's unwind index (PT_GNU_EH_FRAME:
+# .eh_frame_hdr's sorted table of FDEs, each FDE's pc_begin and
+# pc_range): a function's exact bounds without a symbol (libm has no
+# .symtab, and its IFUNC targets such as __expf_fma are local: callee
+# translation could not size them, 2026-10-14). rax its loaded address,
+# rdx its size; 0 when the object has no index in the encodings expected
+# (version 1, eh_frame_ptr pcrel|sdata4, fde_count udata4, the table
+# datarel|sdata4, an FDE's pc_begin pcrel|sdata4, checked against the
+# table's initial location) or none covers the offset.
+	.set EH_PHOFF, 32
+	.set EH_PHNUM, 56
+	.set PH_BYTES, 56
+	.set PT_GNU_EH_FRAME, 0x6474e550
+eh_func_at:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq OBJ_MAP(%rbx), %rax
+	movq EH_PHOFF(%rax), %rcx
+	addq %rax, %rcx				# the program headers (in the file mapping)
+	movzwl EH_PHNUM(%rax), %edx
+1:	testl %edx, %edx
+	jz 8f
+	cmpl $PT_GNU_EH_FRAME, (%rcx)
+	je 2f
+	addq $PH_BYTES, %rcx
+	decl %edx
+	jmp 1b
+2:	movq 16(%rcx), %r13			# its virtual address
+	addq OBJ_BASE(%rbx), %r13		# loaded (a read-only segment of the object)
+	cmpb $1, 0(%r13)
+	jne 8f
+	cmpb $0x1b, 1(%r13)
+	jne 8f
+	cmpb $0x03, 2(%r13)
+	jne 8f
+	cmpb $0x3b, 3(%r13)
+	jne 8f
+	movl 8(%r13), %r14d			# the FDEs
+	testl %r14d, %r14d
+	jz 8f
+	movq OBJ_BASE(%rbx), %r8
+	addq %r12, %r8
+	subq %r13, %r8				# the address relative to the header (the table's base)
+	xorl %ecx, %ecx				# lo
+	movl %r14d, %edx			# hi: the first entry past the address
+3:	cmpl %edx, %ecx
+	jae 4f
+	leal (%rcx,%rdx), %eax
+	shrl $1, %eax
+	movslq 12(%r13,%rax,8), %r9		# its initial location
+	cmpq %r8, %r9
+	jg 31f
+	leal 1(%rax), %ecx
+	jmp 3b
+31:	movl %eax, %edx
+	jmp 3b
+4:	testl %ecx, %ecx
+	jz 8f
+	decl %ecx				# the last entry at or below the address
+	movslq 12(%r13,%rcx,8), %r9
+	addq %r13, %r9				# the function's start, by the table
+	movslq 16(%r13,%rcx,8), %r10
+	addq %r13, %r10				# its FDE
+	cmpl $-1, 0(%r10)
+	je 8f					# a 64-bit length: not the expected form
+	movslq 8(%r10), %rax
+	leaq 8(%r10,%rax), %rax			# pc_begin (pcrel)
+	cmpq %r9, %rax
+	jne 8f
+	movl 12(%r10), %edx			# pc_range
+	movq OBJ_BASE(%rbx), %rcx
+	addq %r12, %rcx
+	subq %rax, %rcx
+	cmpq %rdx, %rcx
+	jae 8f					# past its end: no function there
+	jmp 9f
+8:	xorl %eax, %eax
+	xorl %edx, %edx
+9:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# eh_name(object entry rdi, function address rsi): "file+0xOFF" in the
+# names arena (the object path's last part, the offset in hex), rax; 0
+# when the arena is full.
+	.set EHN_CAP, 65536
+	.bss
+eh_names:	.skip EHN_CAP
+eh_names_used:	.skip 8
+	.text
+eh_name:
+	movq eh_names_used(%rip), %rax
+	cmpq $EHN_CAP - 128, %rax
+	jae 8f
+	leaq eh_names(%rip), %r8
+	addq %rax, %r8				# the name
+	movq %r8, %r9
+	leaq OBJ_PATH(%rdi), %rdx		# the path's last part
+	movq %rdx, %rcx
+1:	movzbl (%rdx), %eax
+	testl %eax, %eax
+	jz 2f
+	incq %rdx
+	cmpl $'/', %eax
+	jne 1b
+	movq %rdx, %rcx
+	jmp 1b
+2:	xorl %edx, %edx
+3:	movzbl (%rcx,%rdx), %eax
+	testl %eax, %eax
+	jz 4f
+	cmpl $80, %edx
+	jae 4f
+	movb %al, (%r9)
+	incq %r9
+	incl %edx
+	jmp 3b
+4:	movb $'+', (%r9)
+	movb $'0', 1(%r9)
+	movb $'x', 2(%r9)
+	addq $3, %r9
+	subq OBJ_BASE(%rdi), %rsi		# the offset
+	movl $60, %ecx				# hex digits, leading zeros skipped
+	xorl %edx, %edx				# a digit written
+5:	movq %rsi, %rax
+	shrq %cl, %rax
+	andl $15, %eax
+	testl %edx, %edx
+	jnz 6f
+	testl %eax, %eax
+	jnz 6f
+	testl %ecx, %ecx
+	jnz 7f
+6:	movl $1, %edx
+	cmpl $10, %eax
+	jb 61f
+	addl $'a' - 10 - '0', %eax
+61:	addl $'0', %eax
+	movb %al, (%r9)
+	incq %r9
+7:	subl $4, %ecx
+	jns 5b
+	movb $0, (%r9)
+	incq %r9
+	subq %r8, %r9
+	addq %r9, eh_names_used(%rip)
+	movq %r8, %rax
+	ret
+8:	xorl %eax, %eax
 	ret
 
 # The loaded objects seen so far: the executable and the shared objects
