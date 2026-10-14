@@ -1,5 +1,13 @@
 # Intel-Phi-AVX512: notes for an agent working here
 
+**Frozen at 3ee445c (2026-10-14).** Development continues in
+[Intel-Phi-AVX-512-C](https://github.com/Lasimeri/Intel-Phi-AVX-512-C),
+which shares this history up to 3ee445c and owns the card worker and
+its deploys from then on. This checkout
+(`/mnt/raid5/phi/Intel Phi AVX-512`) still serves production through
+`scripts/phi-ggml.sh` and `host/target/release/libggml_phi.so` until
+llama.phi's `PHI_AVX512` points at the C checkout.
+
 Read `CONTRIBUTING.md` first; it is the authority. The non-obvious rules:
 
 - What this is: the Xeon Phi cards as an AVX-512 co-processor (phi512, the
