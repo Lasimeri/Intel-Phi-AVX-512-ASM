@@ -14,6 +14,8 @@ stages and gates are in the dated records under `docs/results`).
 ```
 PHI512_V3=1 scripts/phi512.sh -- ./my-avx512-program        # the assembly library, four cards
 PHI512_CARDS=0,1,2,3 PHI512_VERBOSE=1 LD_PRELOAD=host/target/release/libphi512-asm.so ./my-avx512-program
+PHI512_CARDS=0,1,2,3 PHI512_VERBOSE=1 LD_PRELOAD=host/target/release/libphi512-asm.so \
+    llama-server -m Qwen3.8-Flash-Next-BF16-00001-of-00008.gguf -ngl 0 -t 1 --port 8012   # the target: the full AVX-512 build
 ```
 
 The host is the GPU rack's EPYC 7742 (no AVX-512) with four cards.
@@ -46,14 +48,19 @@ are replaced). What runs today:
 | 1 | protocol v3: slot processes on the card, one 64-byte line of doorbells, `K_PING`, `K_LOAD`, `K_FEXEC`, `K_RESIDENT`, `K_PUSH`, `K_FLUSH` | round trips 45 to 48 us; a 114-slice dispatch 40 us |
 | 2 | the assembly preload (`host/asm/phi512`: the SIGILL handler, the register file from the signal frame, residency by 64 KiB units with a coverage bitmap, loops split into a stripe per card, outputs fetched by the card's DMA engine) | the seamless test bit-identical on four cards; 64 MiB of outputs in 18 to 20 ms (3.2 GB/s) |
 | 3 | the translator: `decode.S` (every field equal to iced-x86 over 2.34 million instructions of ten binaries), `fnscan.S` (a function indexed: kinds, branch targets, calls), `mvex.S` and `xlate.S` (the recipes: one-to-one forms, 128- and 256-bit forms under lane masks, the unaligned pairs, extracts, shuffles, scalar forms), `blob.S` (a function's blob: copies, re-based rip-relative operands, branches re-laid out, exits, constants, the rip map), `xlfn.S` (a function translated at its first fault, loaded on every card) | the seamless test from automatic translation, the table above |
-| 3, in progress | regions and exits (`region.S`): a function runs on the card from the fault to its next call, return, jump out or syscall; the host continues natively from there; memory the region touches is made resident as it faults, shadowed, and written back by diff | the region test's first kernel: the loop on the card, the call served on the host with the right data, the second region resumed |
+| 3, regions | regions and exits (`region.S`): a function runs on card 0 from the fault to its next call, return, jump out or syscall, and the host continues natively from there; the function is found in whichever object is mapped at the fault (`elf.S`: the maps line's path and file offset, that file's symbol table); memory the region touches is made resident in 64 KiB units as it faults, shadowed on the host, and written back by line diff; the lines the host changed since travel with the request and the card copies them in with its own stores (a DMA fill is not coherent against a line a core holds dirty) | llama-server of the full AVX-512 build on the BF16 Qwen3.8 Flash-Next shard: 976 regions on card 0 through libmtmd's constructor, the C++ regex compiler and the option parser, about 2 ms a region, no crash; then `-m` rejected by a silently wrong region, the open item |
+| 3, recipes | the recipes measured against the objects llama-server loads (`tools/recipe-census.c`, by the decoder's own mnemonic ids): 322,212 vector instructions of 289 mnemonics in libllama-server-impl, libllama-common, libllama, libggml-base, libggml-cpu and libmtmd, of which 25,321 (123 mnemonics) have no recipe after the batch of 2026-10-13 evening (`xlate2.S`: the qword adds, shifts, multiplies, compares and min/max in dword lanes, the widenings and conversions, the blends, float min/max, the block shuffles, insertps, the byte shifts, the mask shifts: 75 forms, assembled and census-checked, not yet run on the card); the two form suites are 11 and 23 mnemonics short | the suites' verdicts on card 0 are the gate; the byte and word forms of the quantized kernels (vpshufb, vpmaddubsw, vpmaddwd) come after the BF16 path |
 
-The target is `llama.phi`'s AVX-512F build of `libggml-cpu.so` under
-the twin's `llama-simple` on the BF16 Qwen3.8 Flash-Next model (the
-AVX2 twin's reference: 1.78 tokens/s, its text recorded), the
-functions it faults in translated lazily; then the planner that gives
-each kernel its loop and operand ranges automatically, the placement of
-dense rows and hot experts on the cards, and the A/B against production.
+The target is `llama-server` of `llama.phi`'s full AVX-512 build
+(every library of it built `-mavx512f`, nothing swapped) on the BF16
+Qwen3.8 Flash-Next model, the functions it faults in translated lazily
+and run as regions on the cards; no stand-in program, smaller model or
+simulation stands for it. The reference is the same server on the AVX2
+twin build, measured the same way (32 greedy tokens of one prompt; the
+earlier 1.78 tokens/s was `llama-simple`'s and is not compared). Then
+the planner that gives each kernel its loop and operand ranges, the
+placement of dense rows and hot experts over the four cards with two
+threads a core, and the A/B against production.
 
 ## What you need
 
@@ -80,7 +87,8 @@ dense rows and hot experts on the cards, and the A/B against production.
 
 The wrapper preloads `libphi512-asm.so` (`host/asm/phi512`). The host
 CPU raises SIGILL at the program's first AVX-512 instruction; the
-handler finds the function that holds it (the executable's symbol
+handler finds the function that holds it in whichever object is
+mapped there (the maps line's path and file offset, that file's symbol
 table), indexes it instruction by instruction (`decode.S`, `fnscan.S`),
 and builds its blob for the card (`blob.S`): the scalar instructions
 copied, a rip-relative operand re-based through a register, the
@@ -100,6 +108,19 @@ stripe per card, the outputs fetched back (`K_PUSH`). At an exit the
 host continues natively from the address the blob named, with the
 registers as the card left them and the card's writes applied; the
 next AVX-512 instruction starts the next region.
+
+Between regions the host keeps a shadow of every resident unit and
+compares it with the program's memory before the next request: the
+lines the host changed since travel with the request and the card
+copies them in with its own stores, because a DMA fill does not replace
+a line a core still holds dirty; a unit whose floor a region lowered is
+refreshed whole between the two floors. The scalar instructions the
+P54C core lacks are rewritten in the blob: a CMOV as a jump over a
+move; prefetch, the fences, clflush and pause dropped. What no recipe
+expresses refuses the function with the instruction named
+(`xlate-check FILE FUNCTION` shows where), and `tools/recipe-census.c`
+lists what an object's code needs that no recipe gives, by the
+decoder's own mnemonic ids.
 [`host/asm/phi512/phi512.md`](host/asm/phi512/phi512.md) lists the
 units; [`card/vpu/fexec.md`](card/vpu/fexec.md) and
 [`card/vpu/resident.md`](card/vpu/resident.md) have the card's side.
@@ -374,7 +395,7 @@ and `libggml_phi.so` from this repository.
 | `host/crates/phi-pld` | `phi-pld`, prompt lookup decoding over libllama (llama.cpp unchanged), served as llama-server serves; its simulator; built where llama.cpp is found |
 | `card/vpu` | the card-side worker: the exec engine, the explicit path's thread pool and the matrix-multiply service; built by `scripts/phi-vpu.sh deploy`, on the host with the stack's cross toolchain when it has one (`card/vpu/build.md`) |
 | `card/examples` | the AVX-512 kernel and its translation the explicit path and the ground-truth check use |
-| `tools` | the seamless, narrow, forms, review and region tests, the decoder and scan checks against iced-x86, the table generators, the protocol layout check |
+| `tools` | the seamless, narrow, forms, review and region tests, the decoder and scan checks against iced-x86, the recipe census and the translation check (`recipe-census`, `xlate-check`), the table generators, the protocol layout check |
 | `scripts` | `phi512.sh` (the wrapper), `phi-vpu.sh` (the worker), `phi512-check.sh` and `phi512-ground.sh` (conformance against hardware and against the card), `phi512-install.sh` (system-wide preload) |
 | `docs/research` | the precision audit that gates the translation, and the transparency design |
 | `docs/results` | dated records with every number |
@@ -390,7 +411,8 @@ the rules.
 | repository | what | how it is found |
 | --- | --- | --- |
 | [Intel-Phi-3120A](https://github.com/Lasimeri/Intel-Phi-3120A) | the cards' software stack: boots them, serves their memory, the `phi` command | `PHI_STACK_ROOT`, else `phi` on PATH, else a checkout next to this one, else in `$HOME` |
-| Intel-Phi-AVX512 (this one) | the cards as an AVX-512 co-processor | `PHI_AVX512_ROOT`, else a checkout next to Intel-Phi-Jev, else in `$HOME` |
+| [Intel-Phi-AVX-512-ASM](https://github.com/Lasimeri/Intel-Phi-AVX-512-ASM) (this one) | the cards as an AVX-512 co-processor, the host library in assembly (Intel-Phi-AVX512 until 2026-10-13) | `PHI_AVX512_ROOT`, else a checkout next to Intel-Phi-Jev, else in `$HOME` |
+| [Intel-Phi-AVX-512-C](https://github.com/Lasimeri/Intel-Phi-AVX-512-C) | the same history to 71ab2ce, reserved for a C version of the host library; nothing written there yet | |
 | [Intel-Phi-Stream](https://github.com/Lasimeri/Intel-Phi-Stream) | a thought stream over the GPU, the cards and host memory, through `libggml_phi.so` and `scripts/phi-ggml.sh` | `PHI_AVX512_ROOT`, else a checkout next to it, else in `` |
 | [Intel-Phi-Jev](https://github.com/Lasimeri/Intel-Phi-Jev) | `xks`, a local Jev (TypeSafe System One) whose model runs through `libggml_phi.so` (its `cards` site) and `phi512.sh` (its `avx512` site) | by Mechanical-Jev |
 | [Mechanical-Jev](https://github.com/Lasimeri/Mechanical-Jev) | `mjev`, the asking side of that Jev | |

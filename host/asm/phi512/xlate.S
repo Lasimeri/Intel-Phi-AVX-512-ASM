@@ -208,6 +208,7 @@ xl_forms:
 	FORM MN_Vpcmpeqq, xl_cmp_q, 0, 0
 	FORM MN_Vzeroupper, xl_nothing, 0, 0
 	FORM MN_Vzeroall, xl_zeroall, 0, 0
+	.include "xlate2.inc"
 xl_forms_end:
 s_no_recipe:	.asciz "no recipe for this instruction"
 s_no_temp:	.asciz "no free vector register or scratch slot for a temporary"
@@ -219,6 +220,7 @@ s_scalar_mem:	.asciz "a scalar operation with a memory operand is not translated
 
 	.data
 	.balign 8
+	.globl xl_tab
 xl_tab:	.skip MN_COUNT * 8
 xl_inited: .quad 0
 
@@ -606,7 +608,11 @@ xl_nds:
 2:	movb %r15b, MV_K(%rsp)
 	movzbl IN_VVVV(%r12), %eax
 	movb %al, MV_VVVV(%rsp)
-	# the second source
+	testl $XB_IMM, %r14d
+	jz 21f
+	movzbl IN_IMM(%r12), %eax
+	movw %ax, MV_IMM(%rsp)		# valignd: the immediate
+21:	# the second source
 	testb $H_MEM, IN_HAS(%r12)
 	jz 3f
 	cmpb $0, IN_B(%r12)
@@ -3885,3 +3891,4 @@ xl_cmp_q:
 	.byte 0x89, 0xc1, 0xc1, 0xe9, 0x04, 0x09, 0xc8, 0x25, 0xff, 0x00, 0x00, 0x00
 .Lb_and_eax_ecx: .byte 0x21, 0xc8
 	.text
+	.include "xlate2.S"
