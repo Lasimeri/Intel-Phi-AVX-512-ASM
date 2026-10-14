@@ -287,7 +287,7 @@
 # mail at SLOT_MAIL, the progress line at SLOT_PROGRESS.
 	.set SL_SEQ, 0
 	.set SL_KIND, 8
-	.set SL_FLAGS, 12
+	.set SL_FLAGS, 12			# K_FEXEC: FXF_*; K_RESIDENT: the units of the chunk (a bit per 64 KiB)
 	.set SL_FN_ID, 16
 	.set SL_ENTRY, 24
 	.set SL_THREADS, 32

@@ -46,10 +46,12 @@ region_run(uc rdi, seed rsi, entry rdx) -> eax 0 (the frame is set),
      xmm0 to xmm15 and their ymm halves), the file kept as the shadow.
 
 The unit table holds up to 1024 units with 64 KiB shadows in a 64 MiB
-arena; the readable pages of a unit come from `copy_mapped`
-(`copy_mapped_pages`, a bit per 4 KiB page) at residency and again at
-every refresh, so a page the program unmaps or protects after a region
-is never compared or written back (the narrow suite's page-end check
+arena; the readable and the writable pages of a unit come from
+`copy_mapped` (`copy_mapped_pages`, `copy_mapped_wpages`: a bit per
+4 KiB page) at residency and again at every refresh, so a page the
+program unmaps or protects after a region is never compared, and a
+line is written back only into a page the program can write (the host
+died storing into a library's read-only page before) (the narrow suite's page-end check
 protects its second page after the load; before this the host wrote the
 line into it and died, 2026-10-13).
 

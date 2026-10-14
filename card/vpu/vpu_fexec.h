@@ -78,7 +78,7 @@ struct vpu_stripe { uint64_t lo, hi; };
 struct vpu_slot_req {
     uint64_t seq;
     uint32_t kind;             /* VPU_K_* */
-    uint32_t flags;
+    uint32_t flags;            /* K_FEXEC: VPU_FXF_*; K_RESIDENT: the units of the chunk, a bit per 64 KiB */
     uint64_t fn_id;
     uint64_t entry;            /* offset into the blob */
     uint32_t threads;

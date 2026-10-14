@@ -105,3 +105,31 @@ the flush (a generation in the table): not yet, one slot a card today.
   program addresses with one `mremap`: every `mremap` or `munmap` of a
   huge page in the slot process is a TLB shootdown over its ~110 running
   threads' CPUs (about 100 us each on the card).
+
+## Writable units by 64 KiB (2026-10-13, night)
+
+The chunk model hid a hole: the host tracks the program's memory by
+64 KiB units (a shadow, a refresh, a write-back each), but the first
+fault in a 2 MiB chunk placed the whole huge page, so every later touch
+to another unit of that chunk neither faulted nor was filled nor pulled
+back: the program read garbage there and its writes were lost (the
+options vector of `llama-server` moved on the card at every growth and
+never came back: "invalid argument: -m" after 976 regions, with 7 units
+resident, one per chunk).
+
+A `K_RESIDENT` of class 1 (writable) now takes no pool page. The
+dispatcher marks the job (`SH_RES_IDX` -2, no fill to wait for) and the
+slot process does the rest (`res_map_units`): each unit of the request's
+mask (`SL_FLAGS`, a bit per 64 KiB of the chunk) is mapped once at the
+program's address as ordinary 4 KiB pages, private to the process,
+read-write (`MAP_FIXED` over the reservation's piece inside it; as a hint
+that must land outside it, backed out when it does not), and remembered
+in `wmap_tab` (4096 units); when the fill has bytes, the unit's 64 KiB
+are copied from the staged chunk by this core (`phi_copy64`: coherent
+with its caches, where a DMA fill is not against a line a core holds).
+A unit the host has not sent stays `PROT_NONE` and faults, so the host
+sees every unit the program touches. `K_PUSH` of such a unit (the pool
+has no page for it: `res_push` returns 0, the dispatcher marks -2) is the
+slot's own copy into the staging slot (`res_push_unit`). `K_FLUSH`
+restores the reservation over every unit (`res_unmap_units`). The pool
+and its chunks stay for the immutable class.

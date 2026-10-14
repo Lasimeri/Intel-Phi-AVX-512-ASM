@@ -555,6 +555,7 @@ card_resident_post:
 	movq %r12, SL_FN_ID(%rcx)
 	movq %r15, SL_ENTRY(%rcx)
 	movl %r14d, SL_THREADS(%rcx)
+	movl %r13d, SL_FLAGS(%rcx)		# the units (a bit per 64 KiB): a writable unit is mapped by itself on the card
 	movq %r8, SL_FILL_OFF(%rcx)
 	movq %r9, SL_FILL_LEN(%rcx)
 	movq %rbx, %rdi

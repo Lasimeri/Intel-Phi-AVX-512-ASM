@@ -24,7 +24,8 @@
 	.set WU_ADDR, 0				# the unit's address
 	.set WU_SHADOW, 8			# its shadow (64 KiB)
 	.set WU_LO, 16				# the lowest address lines are written back from (the stack unit: below the frame's rsp is the handler's own)
-	.set WU_PAGES, 24			# u16: the mapped 4 KiB pages
+	.set WU_PAGES, 24			# u16: the readable 4 KiB pages (filled, refreshed, verified)
+	.set WU_WPAGES, 26			# u16: the writable ones (written back)
 	.set WU_FLO, 32				# a range to refresh whole at the next region (the floor was lowered: the
 	.set WU_FHI, 40				# card may have written below the old floor, which the shadow never saw)
 	.set WU_BYTES, 48
@@ -504,6 +505,8 @@ wu_ensure:
 	call copy_mapped
 	movzwl copy_mapped_pages(%rip), %eax
 	movw %ax, WU_PAGES(%rbx)		# the readable pages only (a PROT_NONE page is in the maps but not writable)
+	movzwl copy_mapped_wpages(%rip), %eax
+	movw %ax, WU_WPAGES(%rbx)
 	# the need on card 0: the chunk and the unit's bit, class 1 (written back)
 	xorl %edi, %edi
 	movq %r12, %rsi
@@ -566,6 +569,8 @@ wu_refresh:
 	call copy_mapped
 	movzwl copy_mapped_pages(%rip), %eax
 	movw %ax, WU_PAGES(%rbx)		# the pages as mapped now (the program may have unmapped some)
+	movzwl copy_mapped_wpages(%rip), %eax
+	movw %ax, WU_WPAGES(%rbx)
 	xorl %r13d, %r13d			# page
 2:	cmpl $16, %r13d
 	jae 8f
@@ -765,7 +770,7 @@ wu_writeback:
 	xorl %r14d, %r14d			# page
 2:	cmpl $16, %r14d
 	jae 7f
-	btw %r14w, WU_PAGES(%rbx)
+	btw %r14w, WU_WPAGES(%rbx)		# a line in a page the program cannot write is never written back
 	jnc 6f
 	movq %r14, %r9
 	shlq $12, %r9

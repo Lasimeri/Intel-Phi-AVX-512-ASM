@@ -65,6 +65,12 @@ host's residency budget at stage 2).
 
 ## K_RESIDENT, the pool and the write-back (2026-10-13, later)
 
+Class 1 (writable) requests bypass the pool since the night of
+2026-10-13: the dispatcher sets `SH_RES_IDX` to -2 and the slot maps
+and fills the units itself; a `K_PUSH` the pool cannot serve is marked
+-2 the same way and the slot copies the unit (see
+[`resident.md`](resident.md), "Writable units by 64 KiB").
+
 The dispatcher reads a `K_RESIDENT`'s request line (the kind rides in
 the u16's top five bits), assigns a pool page and submits the DMA fill
 straight into its frame ([`resident.md`](resident.md)); the page index

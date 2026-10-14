@@ -52,7 +52,10 @@ trip per piece, 64 KiB pieces today.
 
 Residency is by 64 KiB units: a chunk's entry keeps a coverage bitmap
 (`RE_FILLED`), `card_need` says which of a call's units the card lacks,
-`card_resident_post` stages their span (`copy_mapped`, through
+`card_resident_post` puts the units mask in the request's `flags` (a
+bit per 64 KiB; a writable unit is mapped by itself on the card, see
+[`../../../card/vpu/resident.md`](../../../card/vpu/resident.md)) and
+stages their span (`copy_mapped`, through
 `/proc/self/mem`) into the next staging slot and posts `K_RESIDENT` with
 the fill range (0 bytes for a chunk only written: the page), and
 `card_resident_done` waits and enters the page and the units. Pushes:

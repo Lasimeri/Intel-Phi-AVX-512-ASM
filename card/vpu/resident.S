@@ -382,6 +382,7 @@ res_flush:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
+	call res_unmap_units			# the writable units first
 	xorl %ebx, %ebx
 	xorl %r13d, %r13d
 1:	cmpq res_n(%rip), %rbx
@@ -593,3 +594,226 @@ res_push:
 	ret
 8:	xorl %eax, %eax
 	jmp 7b
+
+# Writable units (class 1, 2026-10-13 night): the program's writable
+# memory lives on the card by 64 KiB units of ordinary 4 KiB pages,
+# private to the slot process, mapped read-write at the program's
+# address the first time the host sends the unit (over the reservation's
+# piece inside it, as a hint that must land outside it) and filled by
+# this process's own stores from the staging slot: coherent with its
+# caches, no pool page, no DMA. A unit the host has not sent stays
+# PROT_NONE and faults (X_FAULT), so the host tracks every unit the
+# program touches; the pool and its chunks serve the immutable class.
+# See resident.md.
+	.set WUNIT_BYTES, 65536
+	.set WMAP_MAX, 4096
+	.bss
+	.balign 64
+wmap_tab:	.skip WMAP_MAX * 8		# the units mapped here (addresses)
+wmap_n:		.skip 8
+	.text
+
+# wmap_find(rdi unit address): eax 1 when the unit is mapped here.
+wmap_find:
+	xorl %ecx, %ecx
+	leaq wmap_tab(%rip), %rdx
+1:	cmpq wmap_n(%rip), %rcx
+	jae 2f
+	cmpq (%rdx,%rcx,8), %rdi
+	je 3f
+	incq %rcx
+	jmp 1b
+2:	xorl %eax, %eax
+	ret
+3:	movl $1, %eax
+	ret
+
+# wmap_place(rdi unit address): the unit mapped read-write at the
+# address: inside the reservation over its piece (MAP_FIXED), elsewhere
+# as a hint that must land (unmapped again when it did not). eax 1 when
+# it did.
+wmap_place:
+	pushq %rbx
+	movq %rdi, %rbx
+	movabsq $RESV_LO, %rax
+	cmpq %rax, %rbx
+	jb 1f
+	movabsq $RESV_HI, %rax
+	cmpq %rax, %rbx
+	jae 1f
+	movq %rbx, %rcx
+	movabsq $RESV_LO, %rax
+	subq %rax, %rcx
+	shrq $30, %rcx
+	leaq resv_bits(%rip), %rax
+	btq %rcx, (%rax)
+	jnc 1f
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, %r10d
+	jmp 2f
+1:	movl $MAP_PRIVATE | MAP_ANONYMOUS, %r10d
+2:	movq %rbx, %rdi
+	movl $WUNIT_BYTES, %esi
+	movl $PROT_READ | PROT_WRITE, %edx
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 8f
+	cmpq %rbx, %rax
+	je 9f
+	movq %rax, %rdi				# landed elsewhere: backed out
+	movl $WUNIT_BYTES, %esi
+	SYS SYS_munmap
+8:	xorl %eax, %eax
+	popq %rbx
+	ret
+9:	movl $1, %eax
+	popq %rbx
+	ret
+
+# wmap_restore(rdi unit address): PROT_NONE again over the reservation's
+# piece, unmapped elsewhere.
+wmap_restore:
+	pushq %rbx
+	movq %rdi, %rbx
+	movabsq $RESV_LO, %rax
+	cmpq %rax, %rbx
+	jb 1f
+	movabsq $RESV_HI, %rax
+	cmpq %rax, %rbx
+	jae 1f
+	movq %rbx, %rcx
+	movabsq $RESV_LO, %rax
+	subq %rax, %rcx
+	shrq $30, %rcx
+	leaq resv_bits(%rip), %rax
+	btq %rcx, (%rax)
+	jnc 1f
+	movq %rbx, %rdi
+	movl $WUNIT_BYTES, %esi
+	movl $PROT_NONE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	SYS SYS_mmap
+	popq %rbx
+	ret
+1:	movq %rbx, %rdi
+	movl $WUNIT_BYTES, %esi
+	SYS SYS_munmap
+	popq %rbx
+	ret
+
+# res_map_units(rdi chunk, esi units, rdx staging index, rcx fill bytes):
+# every unit of the mask mapped here (once) and, when the fill has
+# bytes, its 64 KiB copied from the staged chunk by this core. eax 0, or
+# 1 when a mapping did not land or the table is full. A slot's.
+	.globl res_map_units
+res_map_units:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	movq %rdx, %r13
+	shlq $21, %r13
+	addq $OFF_RESIDENT, %r13
+	addq window(%rip), %r13			# the staged chunk
+	movq %rcx, %r14				# the fill's bytes (0: the mapping only)
+	xorl %r15d, %r15d			# the unit
+1:	cmpl $32, %r15d
+	jae 8f
+	btl %r15d, %r12d
+	jnc 7f
+	movq %r15, %rdi
+	shlq $16, %rdi
+	addq %rbx, %rdi				# the unit's address
+	call wmap_find
+	testl %eax, %eax
+	jnz 3f
+	cmpq $WMAP_MAX, wmap_n(%rip)
+	jae 9f
+	movq %r15, %rdi
+	shlq $16, %rdi
+	addq %rbx, %rdi
+	call wmap_place
+	testl %eax, %eax
+	jz 9f
+	movq %r15, %rdi
+	shlq $16, %rdi
+	addq %rbx, %rdi
+	movq wmap_n(%rip), %rax
+	leaq wmap_tab(%rip), %rcx
+	movq %rdi, (%rcx,%rax,8)
+	incq wmap_n(%rip)
+3:	testq %r14, %r14
+	jz 7f
+	movq %r15, %rdi
+	shlq $16, %rdi
+	movq %rdi, %rsi
+	addq %r13, %rsi				# from the staged chunk
+	addq %rbx, %rdi				# into the unit
+	movl $WUNIT_BYTES / 64, %edx
+	call phi_copy64
+7:	incl %r15d
+	jmp 1b
+8:	xorl %eax, %eax
+	jmp 10f
+9:	movl $1, %eax
+10:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# res_push_unit(rdi address, rsi staging index, rdx bytes): the bytes at
+# a writable unit's address (64-aligned, within the unit) copied by this
+# core into the staging slot (K_PUSH of a unit the pool does not hold).
+# eax 1, or 0 when the unit is not mapped here. A slot's.
+	.globl res_push_unit
+res_push_unit:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	movq %rbx, %rdi
+	andq $-WUNIT_BYTES, %rdi
+	call wmap_find
+	testl %eax, %eax
+	jz 9f
+	movq %r12, %rdi
+	shlq $21, %rdi
+	addq $OFF_RESIDENT, %rdi
+	addq window(%rip), %rdi			# the staging slot
+	movq %rbx, %rsi
+	movq %r13, %rdx
+	shrq $6, %rdx
+	call phi_copy64
+	movl $1, %eax
+9:	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# res_unmap_units: every writable unit of this process gone (the
+# reservation restored over it), at the session's end. eax the units.
+	.globl res_unmap_units
+res_unmap_units:
+	pushq %rbx
+	xorl %ebx, %ebx
+1:	cmpq wmap_n(%rip), %rbx
+	jae 8f
+	leaq wmap_tab(%rip), %rax
+	movq (%rax,%rbx,8), %rdi
+	call wmap_restore
+	incq %rbx
+	jmp 1b
+8:	movq wmap_n(%rip), %rax
+	movq $0, wmap_n(%rip)
+	popq %rbx
+	ret

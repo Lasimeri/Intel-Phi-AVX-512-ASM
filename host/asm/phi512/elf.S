@@ -39,7 +39,9 @@ maps_buf:	.skip MAPS_CAP
 stat_buf:	.skip STAT_BYTES
 mem_fd:	.skip 8			# /proc/self/mem, opened at the first copy
 	.globl copy_mapped_pages
-copy_mapped_pages: .skip 2		# the pages of the last copy_mapped's first 64 KiB that were mapped (bit per 4 KiB)
+copy_mapped_pages: .skip 2		# the pages of the last copy_mapped's first 64 KiB that were readable (bit per 4 KiB)
+	.globl copy_mapped_wpages
+copy_mapped_wpages: .skip 2		# ... and writable
 	.balign 8
 
 	.section .rodata
@@ -251,6 +253,7 @@ copy_mapped:
 	leaq (%rsi,%rdx), %r14			# src end
 	xorl %r15d, %r15d			# copied
 	movw $0, copy_mapped_pages(%rip)
+	movw $0, copy_mapped_wpages(%rip)
 	cmpq $0, mem_fd(%rip)
 	jne 14f
 	leaq s_mem(%rip), %rdi
@@ -297,7 +300,10 @@ copy_mapped:
 15:	cmpq %rcx, %rax
 	ja 16f
 	btsw %ax, copy_mapped_pages(%rip)
-	incq %rax
+	cmpb $'w', 1(%rsi)
+	jne 17f
+	btsw %ax, copy_mapped_wpages(%rip)
+17:	incq %rax
 	jmp 15b
 16:	pushq %rsi
 	movq %r8, %rsi

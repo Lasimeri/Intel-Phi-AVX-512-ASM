@@ -221,7 +221,12 @@ slots_poll:
 	leaq slreq(%rip), %rdi
 	movl $SL_REQ_BYTES / 64 + 1, %edx	# the fill range sits in the sixth line
 	call phi_copy64
-	movq slreq + SL_FN_ID(%rip), %rdi
+	cmpl $1, slreq + SL_THREADS(%rip)
+	jne 53f
+	movl $-2, SH_RES_IDX(%r13)		# class 1: the slot maps the units by itself and fills them
+	movq $-1, SH_PULL_SEQ(%r13)
+	jmp 51f
+53:	movq slreq + SL_FN_ID(%rip), %rdi
 	movl slreq + SL_THREADS(%rip), %esi
 	call res_assign
 	movl %eax, SH_RES_IDX(%r13)
@@ -258,7 +263,10 @@ slots_poll:
 	movq slreq + SL_ENTRY(%rip), %rsi
 	movq slreq + SL_FILL_LEN(%rip), %rdx
 	call res_push
-	movq %rax, SH_PULL_SEQ(%r13)
+	testq %rax, %rax
+	jnz 56f
+	movq $-2, %rax				# not in the pool: a writable unit of the slot's own, copied by it
+56:	movq %rax, SH_PULL_SEQ(%r13)
 	popq %rcx
 	jmp 6f
 55:	cmpl $K_FEXEC, %eax
@@ -531,7 +539,31 @@ sched_main:
 	movq %rdi, reply_buf + SR_EXIT_AUX(%rip)	# the copy's number (0: refused), for a refusal's line
 	testq %rdi, %rdi
 	jz 151f
+	cmpq $-2, %rdi
+	jne 152f
+	# a writable unit of this process: copied by this core into the staging slot
 	call now_ns
+	movq %rax, sched_t0 + 8(%rip)
+	movq %r12, %rsi
+	shlq $12, %rsi
+	addq window(%rip), %rsi
+	addq $OFF_SLOTS, %rsi
+	leaq slreq(%rip), %rdi
+	movl $SL_REQ_BYTES / 64 + 1, %edx
+	call phi_copy64
+	movq slreq + SL_FN_ID(%rip), %rdi
+	movq slreq + SL_ENTRY(%rip), %rsi
+	movq slreq + SL_FILL_LEN(%rip), %rdx
+	call res_push_unit
+	testl %eax, %eax
+	jz 151f
+	movq $1, reply_buf + SR_EXIT_RIP(%rip)
+	call now_ns
+	subq sched_t0 + 8(%rip), %rax
+	movq %rax, reply_buf + SR_WB_NS(%rip)
+	movl $1, reply_buf + SR_WB_N(%rip)
+	jmp 1f
+152:	call now_ns
 	movq %rax, sched_t0 + 8(%rip)
 	movq SH_PULL_SEQ(%r13), %rdi
 	call land_wait
@@ -545,9 +577,30 @@ sched_main:
 	jmp 1f
 151:	movl $E_PULL, reply_buf + SR_STATUS(%rip)
 	jmp 1f
-14:	# K_RESIDENT: the page the dispatcher assigned, its fill waited for
+14:	# K_RESIDENT: the page the dispatcher assigned, its fill waited for;
+	# class 1: the units mapped here by 64 KiB and filled by this core
 	movl SH_RES_IDX(%r13), %edi
-	cmpl $-1, %edi
+	cmpl $-2, %edi
+	jne 140f
+	movq %r12, %rsi
+	shlq $12, %rsi
+	addq window(%rip), %rsi
+	addq $OFF_SLOTS, %rsi
+	leaq slreq(%rip), %rdi
+	movl $SL_REQ_BYTES / 64 + 1, %edx
+	call phi_copy64
+	movq slreq + SL_FN_ID(%rip), %rdi
+	movl slreq + SL_FLAGS(%rip), %esi		# the units
+	movq slreq + SL_ENTRY(%rip), %rdx
+	movq slreq + SL_FILL_LEN(%rip), %rcx
+	call res_map_units
+	testl %eax, %eax
+	jz 146f
+	movl $E_ALLOC, reply_buf + SR_STATUS(%rip)
+	jmp 1f
+146:	movq $0xffff, reply_buf + SR_EXIT_AUX(%rip)
+	jmp 1f
+140:	cmpl $-1, %edi
 	jne 141f
 	movl $E_ALLOC, reply_buf + SR_STATUS(%rip)
 	jmp 1f
