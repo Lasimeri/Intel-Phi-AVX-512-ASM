@@ -2466,10 +2466,10 @@ promote_check:
 	call seed_index_of
 	cmpq $2048, %rax
 	jae 9f
-	leaq prom_done(%rip), %rcx
-	cmpb $0, (%rcx,%rax)
-	jne 9f
-	movb $1, (%rcx,%rax)			# once per F
+	# every caller of F is promoted, not only the first: vec_dot_bf16
+	# promoted mul_mat_id's loop and then ran once a row from
+	# ggml_compute_forward_mul_mat (the output layer: ~113 regions/s,
+	# rs19); the callee G is tried once (prom_patched below)
 	movq SD_ADDR(%rbx), %rdi
 	call obj_at
 	testq %rax, %rax

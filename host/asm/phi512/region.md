@@ -277,3 +277,8 @@ interval) is how these were found.
   path): `expf` called from `gated_delta_net` (95 every 5 s) is translated
   and called in-card, and continuation, the trampoline and the single step
   apply there too. glibc's own code translated: the results stay bit-exact.
+- Every caller of a busy F is promoted, not only the first (each caller
+  tried once): `vec_dot_bf16` had promoted `mul_mat_id`'s loop, and then
+  ran once a row from `ggml_compute_forward_mul_mat` (the output layer:
+  ~113 regions/s for minutes, rs19). With continuation, the call already
+  in flight moves to the card at its next row.
