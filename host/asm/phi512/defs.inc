@@ -118,6 +118,8 @@
 	.set SD_INDEX, 152
 	.set SD_NINSN, 160
 	.set SD_REFUSED, 168			# 1: the translation was refused (not tried again)
+	.set SD_NREG, 176			# regions that ended in this seed's blob
+	.set SD_NREG0, 184			# SD_NREG at the last progress line (region.S heartbeat)
 	.set SD_BYTES, 192
 	.set SEEDS_DYN_MAX, 1024		# dynamic seeds the table has room for after the static ones
 # Residency by 64 KiB units: a chunk's entry keeps which units the card

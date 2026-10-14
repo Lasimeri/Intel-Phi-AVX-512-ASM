@@ -152,9 +152,14 @@ clean cached lines (the stack's `docs/results/2026-09-16-dma.md`).
 `K_FLUSH`'s reply carries the pool's bytes in `exit_rip` (every reply's
 `free_bytes` is the card's own, set at the reply's end).
 
-The address reservation (`reserve_high`) has failed with EEXIST at every
-start so far (the pool's log line now says so: "address reservation ...:
--17"); placement works through `resv_free`'s probe of a hole. Because of
+The address reservation (`reserve_high`) had failed with EEXIST at every
+start: the card kernel puts the vdso and vvar inside the range
+(0x7fe9c1288000 on 2026-10-14), so the one mapping over all of it could
+not be made, and the worker's own windows, pools and arenas then landed
+in the program's range. `resv_range` now reserves the range by halves
+around whatever is mapped there already, down to single 1 GiB pieces
+(only the vdso's piece stays out); the pool's log line gives the pieces
+reserved. Placement still probes a hole outside them (`resv_free`). Because of
 that, `resv_restore` now puts a PROT_NONE page back only in a piece the
 reservation holds: before, it mapped one at every evicted address and the
 probe then found the address taken (an evicted chunk could never come

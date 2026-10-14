@@ -181,3 +181,11 @@ frames lie above the floor (refreshed, shadowed, written back) when a
 region leaves the card inside a callee. A fault inside a callee is
 re-posted in the blob that holds the card's rip (`blob_at`, over every
 seed's blob on card 0), and the region's seed becomes that blob's.
+
+## Read-ahead of immutable chunks (2026-10-14)
+
+`ro_need`: a fault on the chunk right after the previous immutable fault
+(a matrix read in order) queues the next `RO_AHEAD` (8) immutable chunks
+card 0 does not hold with it, so their fills go in the same round and the
+region does not leave the card for each (an exit and a re-post saved per
+chunk). `stat_ro_ahead` counts them.

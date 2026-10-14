@@ -406,6 +406,7 @@ region_run:
 	call mem_copy
 	movq $1, shadow_valid(%rip)
 	incq stat_regions(%rip)
+	incq SD_NREG(%r13)
 	call now_ns
 	subq 8(%rsp), %rax
 	addq %rax, stat_region_ns(%rip)
@@ -1863,6 +1864,7 @@ s_hb7:	.asciz " write-back line(s), "
 s_hb8:	.asciz " chunk fill(s) ("
 s_hb9:	.asciz " read-only), "
 s_hb10:	.asciz " eviction(s); last region in "
+s_hb11:	.asciz "; most regions: "
 	.text
 	.globl heartbeat
 heartbeat:
@@ -1947,6 +1949,49 @@ heartbeat:
 	jz 1f
 	movq %r12, %rsi
 	call w_str
+	# the interval's three busiest functions by regions
+	movl $3, %r14d
+71:	xorl %r15d, %r15d
+	xorl %r13d, %r13d
+	xorl %ecx, %ecx
+	leaq seeds(%rip), %rdx
+72:	cmpq nseeds(%rip), %rcx
+	jae 73f
+	movq SD_NREG(%rdx), %rax
+	subq SD_NREG0(%rdx), %rax
+	cmpq %r13, %rax
+	jbe 74f
+	movq %rax, %r13
+	movq %rdx, %r15
+74:	addq $SD_BYTES, %rdx
+	incq %rcx
+	jmp 72b
+73:	testq %r15, %r15
+	jz 76f
+	leaq s_hb11(%rip), %rsi
+	cmpl $3, %r14d
+	je 75f
+	leaq s_rg5(%rip), %rsi
+75:	call w_str
+	movq SD_NAME(%r15), %rsi
+	call w_str
+	movb $' ', %al
+	call w_byte
+	movq %r13, %rdi
+	call w_dec
+	movq SD_NREG(%r15), %rax
+	movq %rax, SD_NREG0(%r15)
+	decl %r14d
+	jnz 71b
+76:	xorl %ecx, %ecx
+	leaq seeds(%rip), %rdx
+77:	cmpq nseeds(%rip), %rcx
+	jae 1f
+	movq SD_NREG(%rdx), %rax
+	movq %rax, SD_NREG0(%rdx)
+	addq $SD_BYTES, %rdx
+	incq %rcx
+	jmp 77b
 1:	movl $2, %edi
 	call l_end
 	movq %rbx, hb_last(%rip)
@@ -1975,6 +2020,10 @@ heartbeat:
 	.balign 8
 	.globl stat_ro_faults
 stat_ro_faults:	.skip 8			# faults taken as immutable chunks
+	.globl stat_ro_ahead
+stat_ro_ahead:	.skip 8			# chunks queued ahead of a sequential fault
+ro_last:	.skip 8			# the last immutable chunk queued
+	.set RO_AHEAD, 8
 	.text
 	.globl ro_need
 ro_need:
@@ -1999,7 +2048,45 @@ ro_need:
 	xorl %ecx, %ecx				# class 0
 	call need_add
 	incq stat_ro_faults(%rip)
-	movl $1, %eax
+	# read-ahead: a fault on the chunk after the previous read-only fault
+	# (a matrix read in order) queues the next RO_AHEAD immutable chunks
+	# card 0 does not hold, so the region does not leave the card for
+	# each: the fills go in this round, the exit and re-post are saved
+	movq ro_last(%rip), %rax
+	movq %rbx, ro_last(%rip)
+	addq $CHUNK, %rax
+	cmpq %rbx, %rax
+	jne 6f
+	pushq %r12
+	pushq %r13
+	movl $1, %r12d
+2:	cmpl $RO_AHEAD, %r12d
+	ja 5f
+	movq %r12, %r13
+	shlq $21, %r13
+	addq %rbx, %r13				# the chunk ahead
+	movq %r13, %rdi
+	call chunk_immutable
+	testl %eax, %eax
+	jz 5f					# past the mapping
+	leaq cards(%rip), %rdi
+	leaq CD_TAB(%rdi), %rdi
+	movq %r13, %rsi
+	call tab_find
+	testq %rax, %rax
+	jnz 3f					# held already
+	xorl %edi, %edi
+	movq %r13, %rsi
+	movl $-1, %edx
+	xorl %ecx, %ecx
+	call need_add
+	incq stat_ro_ahead(%rip)
+	movq %r13, ro_last(%rip)
+3:	incl %r12d
+	jmp 2b
+5:	popq %r13
+	popq %r12
+6:	movl $1, %eax
 	jmp 9f
 8:	xorl %eax, %eax
 9:	popq %rbx

@@ -562,23 +562,78 @@ resv_got:	.skip 8			# reserve_high: the pieces, or mmap's error
 	.globl reserve_high
 reserve_high:
 	movabsq $RESV_LO, %rdi
-	movabsq $RESV_HI - RESV_LO, %rsi
+	movabsq $RESV_HI, %rsi
+	call resv_range
+	movq %rax, resv_got(%rip)		# the pieces (the pool's log line says it)
+	ret
+
+# resv_range(rdi lo, rsi hi, both on pieces): [lo, hi) reserved
+# PROT_NONE in one mapping when nothing is there, else halved and each
+# half tried again, down to single pieces: the card kernel puts the vdso
+# and vvar inside the range (0x7fe9c1288000 on 2026-10-14), and the one
+# mapping over all of it failed with EEXIST at every start, so the
+# worker's own windows and pools landed in the program's range. The
+# pieces reserved get their bits. eax the pieces.
+resv_range:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	subq %rbx, %rsi
 	movl $PROT_NONE, %edx
 	movl $MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, %r10d
 	movq $-1, %r8
 	xorl %r9d, %r9d
 	SYS SYS_mmap
 	cmpq $MAP_FAILED_MAX, %rax
-	ja 9f
-	leaq resv_bits(%rip), %rdi
-	movl $RESV_PIECES / 8 / 8, %ecx
-	movq $-1, %rax
-	rep stosq
-	movl $RESV_PIECES, %eax
-	movq %rax, resv_got(%rip)
-	ret
-9:	movq %rax, resv_got(%rip)		# (the error, negative: the pool's log line says it)
-	xorl %eax, %eax
+	ja 5f
+	cmpq %rbx, %rax
+	jne 5f					# (an old kernel that took the flag as a hint)
+	movq %rbx, %rcx				# the pieces' bits
+	movabsq $RESV_LO, %rax
+	subq %rax, %rcx
+	shrq $30, %rcx
+	movq %r12, %rdx
+	subq %rax, %rdx
+	shrq $30, %rdx
+	movq %rdx, %r13
+	subq %rcx, %r13				# the count
+	leaq resv_bits(%rip), %rax
+1:	cmpq %rdx, %rcx
+	jae 2f
+	btsq %rcx, (%rax)
+	incq %rcx
+	jmp 1b
+2:	movq %r13, %rax
+	jmp 9f
+5:	movq %r12, %rax
+	subq %rbx, %rax
+	shrq $30, %rax				# pieces
+	cmpq $1, %rax
+	jbe 8f
+	shrq $1, %rax
+	shlq $30, %rax
+	addq %rbx, %rax				# the middle, on a piece
+	movq %rax, %r13
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	call resv_range
+	pushq %rax
+	pushq %rax
+	movq %r13, %rdi
+	movq %r12, %rsi
+	call resv_range
+	popq %rcx
+	popq %rcx
+	addq %rcx, %rax
+	jmp 9f
+8:	xorl %eax, %eax
+9:	popq %r13
+	popq %r12
+	popq %rbx
 	ret
 
 # resv_free(rdi address, 2 MiB aligned): eax 1 when a resident page may
