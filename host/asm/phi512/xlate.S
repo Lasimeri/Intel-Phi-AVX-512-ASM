@@ -120,6 +120,10 @@ xl_forms:
 	FORM MN_Vmovdqu32, xl_mov_unaligned, 0, 0
 	FORM MN_Vmovdqu64, xl_mov_unaligned, 0, XB_QWORD
 	FORM MN_Vmovdqu, xl_mov_unaligned, 0, 0
+	FORM MN_Vpmaskmovd, xl_maskmov, 0, 0
+	FORM MN_Shlx, xl_shiftx, 4, 0
+	FORM MN_Shrx, xl_shiftx, 5, 0
+	FORM MN_Sarx, xl_shiftx, 7, 0
 	FORM MN_Vbroadcastss, xl_broadcast, 0, 0
 	FORM MN_Vbroadcastsd, xl_broadcast, 0, XB_QWORD
 	FORM MN_Vpbroadcastd, xl_broadcast, 0, 0
@@ -3912,3 +3916,220 @@ xl_cmp_q:
 .Lb_and_eax_ecx: .byte 0x21, 0xc8
 	.text
 	.include "xlate2.S"
+
+# xl_maskmov: vpmaskmovd (AVX2: VEX.128/256.66.0F38.W0 8C load, 8E
+# store): the dword lanes whose mask (vvvv) has its sign set are moved,
+# a load zeroes the others. The card has no such move: the scratch mask
+# is set to the length's lanes, then vpcmpd k{k}, vvvv, zero, 1 (lt)
+# keeps those whose mask dword is negative; a load zeroes d first (after
+# the compare: d may be the mask register, as in tinyBLAS's gemm_bloc);
+# then the decoded instruction becomes a vmovdqu (6F load, 7F store)
+# under that mask, merging, and xl_mov_unaligned does the move (the
+# unaligned pair: the card needs aligned operands; masked-off lanes are
+# never written, and a read past the program's mapping reads the card's
+# zero pages). 2026-10-14: gemm_bloc left the card at each of its six
+# vpmaskmovd (an X_HOST exit, then native).
+xl_maskmov:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $MV_BYTES + 16, %rsp
+	LOADCTX
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lmk_shape
+	# the scratch mask: the length's lanes
+	EV_LL %edi
+	movl $16, %eax
+	cmpl $2, %edi
+	je 1f
+	xorl %esi, %esi
+	call vl_lanes
+1:	movq %rbx, %rdi
+	movl %eax, %esi
+	call em_mask_imm
+	movl %eax, %r14d			# the scratch k
+	movq %rbx, %rdi
+	call em_temp
+	testl %eax, %eax
+	js .Lmk_notemp
+	movl %eax, %r15d
+	movq %rbx, %rdi
+	movl %r15d, %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero				# a zero vector
+	movq %rsp, %rdi				# vpcmpd k{k}, vvvv, zero, 1: MVEX.66.0F3A.W0 1F
+	movl $3, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0x1f, %r8d
+	movl %r14d, %r9d
+	call mv_set
+	movzbl IN_VVVV(%r12), %eax
+	movb %al, MV_VVVV(%rsp)
+	movw $1, MV_IMM(%rsp)
+	movb %r14b, MV_K(%rsp)
+	movq %rsp, %rdi
+	movl $RM_REG, %esi
+	movl %r15d, %edx
+	call mv_rm
+	movq %rbx, %rdi
+	movq %rsp, %rsi
+	call em_mvex
+	cmpb $0x8c, IN_OP(%r12)
+	jne 2f
+	movq %rbx, %rdi				# a load: d zeroed, then merged into
+	movzbl IN_REG(%r12), %esi
+	xorl %edx, %edx
+	xorl %ecx, %ecx
+	call em_zero
+	movb $0x6f, IN_OP(%r12)
+	jmp 3f
+2:	movb $0x7f, IN_OP(%r12)
+3:	movb %r14b, IN_AAA(%r12)
+	movb $0, IN_Z(%r12)
+	movb $0, IN_VVVV(%r12)
+	movb $2, IN_L(%r12)			# as a 512-bit move: the mask holds the length already, and
+						# xl_mov_unaligned would set its length lanes in the same scratch mask (all lanes moved: the first try)
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	jmp xl_mov_unaligned
+.Lmk_notemp:
+	leaq s_no_temp(%rip), %rax
+	jmp 9f
+.Lmk_shape:
+	leaq s_shape(%rip), %rax
+9:	addq $MV_BYTES + 16, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# xl_shiftx: shlx, shrx, sarx (BMI2: VEX.LZ.{66,F2,F3}.0F38.W0/W1 F7 /r):
+# d = s shifted by vvvv (masked to 31 or 63), the flags untouched. The
+# card has no BMI2: the flags, rax and rcx saved (em_flags, em_rcx), s
+# into rax and the count into rcx (from their saved values when they are
+# rax or rcx), shl/shr/sar rax, cl (D3 /4, /5, /7; REX.W for W1; the
+# 32-bit form zero-extends as the original does), rax into [fs:S_GPR],
+# and d from there once everything is restored (em_gpr_result). A memory
+# s is refused (it stays a lazy site). 2026-10-14: two in
+# ggml_graph_compute_thread made the graph thread leave the card.
+xl_shiftx:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	LOADCTX
+	testb $H_MEM, IN_HAS(%r12)
+	jnz .Lsx_shape
+	movzbl IN_W(%r12), %r14d
+	movl XF_A(%r13), %r15d			# the shift's /reg
+	movq %rbx, %rdi
+	call em_flags
+	movq %rbx, %rdi
+	call em_rcx
+	# s into rax
+	movzbl IN_RM(%r12), %eax
+	cmpl $1, %eax
+	ja 2f
+	movl $S_RAX, %ecx			# rax or rcx: their saved values
+	testl %eax, %eax
+	jz 11f
+	movl $S_RCX, %ecx
+11:	movq %rbx, %rdi
+	xorl %esi, %esi
+	movl $1, %edx
+	xorl %r8d, %r8d
+	call em_gpr_scratch
+	jmp 3f
+2:	movq %rbx, %rdi				# mov rax, rN: REX.W (+B) 8B C0+n
+	movl %eax, %r8d
+	movl $0x48, %eax
+	cmpl $8, %r8d
+	jb 21f
+	orl $1, %eax
+21:	pushq %r8
+	pushq %r8
+	call em_byte
+	movl $0x8b, %eax
+	call em_byte
+	popq %r8
+	popq %r8
+	movl %r8d, %eax
+	andl $7, %eax
+	orl $0xc0, %eax
+	call em_byte
+3:	# the count into rcx
+	movzbl IN_VVVV(%r12), %eax
+	cmpl $1, %eax
+	je 5f					# rcx itself: still the program's
+	testl %eax, %eax
+	jnz 4f
+	movq %rbx, %rdi				# rax: its saved value
+	movl $1, %esi
+	movl $1, %edx
+	movl $S_RAX, %ecx
+	xorl %r8d, %r8d
+	call em_gpr_scratch
+	jmp 5f
+4:	movq %rbx, %rdi				# mov rcx, rN: REX.W (+B) 8B C8+n
+	movl %eax, %r8d
+	movl $0x48, %eax
+	cmpl $8, %r8d
+	jb 41f
+	orl $1, %eax
+41:	pushq %r8
+	pushq %r8
+	call em_byte
+	movl $0x8b, %eax
+	call em_byte
+	popq %r8
+	popq %r8
+	movl %r8d, %eax
+	andl $7, %eax
+	orl $0xc8, %eax
+	call em_byte
+5:	# the shift: [REX.W] D3 /k with rax
+	movq %rbx, %rdi
+	testl %r14d, %r14d
+	jz 6f
+	movl $0x48, %eax
+	call em_byte
+6:	movl $0xd3, %eax
+	call em_byte
+	movl %r15d, %eax
+	shll $3, %eax
+	orl $0xc0, %eax
+	call em_byte
+	movq %rbx, %rdi				# rax into [fs:S_GPR]
+	xorl %esi, %esi
+	movl $1, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+	movq %rbx, %rdi				# d from there, last
+	movzbl IN_REG(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	call em_gpr_result
+	xorl %eax, %eax
+	jmp 9f
+.Lsx_shape:
+	leaq s_shape(%rip), %rax
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret

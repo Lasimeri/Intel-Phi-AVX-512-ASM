@@ -14,10 +14,10 @@
 	.include "proto.inc"
 	.include "mvex.inc"
 
-	.set FX_ARENA, 16 * 1048576
+	.set FX_ARENA, 128 * 1048576		# blobs (no reserve: the used part takes memory; 16 MiB was near full with callee translation)
 	.set FX_STACK, 1048576
 	.set FX_ALTSTACK, 65536
-	.set FX_TAB_MAX, 256
+	.set FX_TAB_MAX, 2048
 	.set FT_ID, 0
 	.set FT_ADDR, 8
 	.set FT_LEN, 16

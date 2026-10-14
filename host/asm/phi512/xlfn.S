@@ -13,7 +13,7 @@
 	.include "fnscan.inc"
 	.include "xlate.inc"
 
-	.set ARENA_BYTES, 64 * 1024 * 1024
+	.set ARENA_BYTES, 512 * 1024 * 1024	# (64 MiB filled in llama-server's first decode once callees were translated, 2026-10-14)
 	.set CONST_CAP, 256
 	.set FIX_CAP, 1024
 	.set BRFIX_CAP, 4096

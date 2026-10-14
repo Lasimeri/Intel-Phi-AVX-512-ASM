@@ -56,12 +56,15 @@ extern uint64_t blob_lazy_n;
 extern struct lazy { uint32_t off, kind; const char *why; } blob_lazy[];
 /* main.S sets it from PHI512_INCALL; 0 here: blobs as the preload builds them by default (in-card calls) */
 uint64_t incall_off = 0;
+/* the code is translated from the file, not mapped at its addresses: plt_resolve must not read call targets */
+extern uint64_t plt_resolve_off;
 extern uint64_t x86_decode(const void *bytes, uint64_t avail, void *out, uint64_t addr);
 
 #define SCRATCH_TPOFF 0x1000
 
 int main(int argc, char **argv)
 {
+	plt_resolve_off = 1;
 	if (argc < 3) {
 		fprintf(stderr, "usage: xlate-check FILE FUNCTION [OUT.bin]\n");
 		return 2;

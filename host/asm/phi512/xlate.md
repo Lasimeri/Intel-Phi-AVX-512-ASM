@@ -67,3 +67,28 @@ translation, bit-identical at 65536, 1M and 16M elements, in the time of
 the hand-written blobs of `seeds.S` (16M: polynomial 71.6 ms against
 72.0, dot product 182.0 against 177.3, integers 57.7 against 57.3):
 [`docs/results/2026-10-13-translator-seamless.md`](../../../docs/results/2026-10-13-translator-seamless.md).
+
+## vpmaskmovd and the BMI2 shifts (2026-10-14)
+
+Two hot functions of llama-server's first decode left the card at
+instructions without a recipe (lazy sites the host ran, then went on
+natively): tinyBLAS's BF16 `gemm_bloc` at six `vpmaskmovd` (AVX2's
+masked move), `ggml_graph_compute_thread` at two `shlx`.
+
+- `xl_maskmov` (vpmaskmovd 8C load, 8E store, 128/256): the scratch mask
+  set to the length's lanes, `vpcmpd k{k}, vvvv, zero, 1` keeps those
+  whose mask dword is negative; a load zeroes d first (after the compare:
+  d may be the mask register); then the instruction is handed to
+  `xl_mov_unaligned` as a 512-bit vmovdqu (6F/7F) merging under that
+  mask. As a 512-bit move because `xl_mov_unaligned` sets its length
+  lanes in the same scratch mask (the first version moved every lane).
+  vpmaskmovq stays a lazy site.
+- `xl_shiftx` (shlx/shrx/sarx, register forms): the flags, rax and rcx
+  saved, s into rax and the count into rcx (their saved values when they
+  are rax or rcx), `shl/shr/sar rax, cl`, the result through
+  `[fs:S_GPR]` into d after everything is restored (`em_gpr_result`).
+
+Gate: `avx512-narrow-test` section 31 (6 checks: vpmaskmovd ymm and xmm
+loads from unaligned addresses, the mask its own destination, ymm and
+xmm stores; shlx/shrx/sarx at 64 and 32 bits with rax, rcx, r8 to r10):
+80/80 on card 0. Built with `-mbmi2` added to the documented line.

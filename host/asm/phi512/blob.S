@@ -1253,6 +1253,8 @@ blob_lazy:	.skip LAZY_MAX * 16
 	.globl plt_resolve
 plt_resolve:
 	movq %rdi, %rax
+	cmpq $0, plt_resolve_off(%rip)		# (xlate-check: the code is not mapped at its addresses there)
+	jne 9f
 	movq %rdi, %rcx
 	cmpl $0xfa1e0ff3, (%rcx)		# endbr64
 	jne 1f
@@ -1274,3 +1276,8 @@ plt_resolve:
 	jb 9f
 2:	movq %rdx, %rax
 9:	ret
+	.bss
+	.balign 8
+	.globl plt_resolve_off
+plt_resolve_off:	.skip 8			# 1: plt_resolve gives the address as it is (tools/xlate-check sets it)
+	.text

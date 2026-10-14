@@ -17,7 +17,7 @@
  * scalar conversions with general registers, the permutes composed from
  * vpermd.
  *
- *   gcc -O1 -mavx512f -mavx512vl -mavx512dq -mavx512bw -mf16c \
+ *   gcc -O1 -mavx512f -mavx512vl -mavx512dq -mavx512bw -mf16c -mbmi2 \
  *       -o avx512-narrow-test tools/avx512-narrow-test.c -lm
  *   scripts/phi512.sh ./avx512-narrow-test
  *
@@ -526,6 +526,62 @@ int main(void)
         asm volatile("vmovups %1, %%zmm17\n\tvbroadcastss (%2), %%zmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "r"(ub + 2) : "xmm16", "xmm17", "memory");
         for (int i = 0; i < 16; i++) w.u[i] = d2;
         check("vbroadcastss from a 2-aligned address", &r, &w, 16);
+    }
+
+    /* 31. vpmaskmovd (AVX2's masked move: tinyBLAS's BF16 gemm_bloc loads
+     * with it) and the BMI2 shifts shlx/shrx/sarx (ggml_graph_compute_thread),
+     * none of which the card has (2026-10-14: each was a lazy site, the
+     * host ran it and the function went on natively). Each block starts
+     * with an EVEX move, so the card runs what follows. */
+    {
+        static uint32_t ms[24] __attribute__((aligned(64))), md[24] __attribute__((aligned(64)));
+        static int32_t mk[8] __attribute__((aligned(32)));
+        static uint32_t mv[8] __attribute__((aligned(32)));
+        for (int i = 0; i < 24; i++) { ms[i] = 0x1000u + 3u * i; md[i] = 0xdead0000u + i; }
+        for (int i = 0; i < 8; i++) { mk[i] = (i % 3 == 1) ? i : -1 - i; mv[i] = 0x77000000u + i; }
+        asm volatile("vmovups %1, %%zmm17\n\tvmovdqu (%2), %%ymm4\n\tvpmaskmovd (%3), %%ymm4, %%ymm3\n\tvmovups %%zmm3, %0"
+                     : "=m"(r) : "m"(a), "r"(mk), "r"(ms + 1) : "xmm3", "xmm4", "xmm17", "memory");
+        memset(&w, 0, sizeof w);
+        for (int i = 0; i < 8; i++) w.u[i] = mk[i] < 0 ? ms[1 + i] : 0;
+        check("vpmaskmovd ymm load from an unaligned address", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\tvmovdqu (%2), %%ymm4\n\tvpmaskmovd (%3), %%ymm4, %%ymm4\n\tvmovups %%zmm4, %0"
+                     : "=m"(r) : "m"(a), "r"(mk), "r"(ms + 3) : "xmm4", "xmm17", "memory");
+        memset(&w, 0, sizeof w);
+        for (int i = 0; i < 8; i++) w.u[i] = mk[i] < 0 ? ms[3 + i] : 0;
+        check("vpmaskmovd ymm load, the mask its own destination", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\tvmovdqu (%2), %%xmm4\n\tvpmaskmovd (%3), %%xmm4, %%xmm3\n\tvmovups %%zmm3, %0"
+                     : "=m"(r) : "m"(a), "r"(mk), "r"(ms + 2) : "xmm3", "xmm4", "xmm17", "memory");
+        memset(&w, 0, sizeof w);
+        for (int i = 0; i < 4; i++) w.u[i] = mk[i] < 0 ? ms[2 + i] : 0;
+        check("vpmaskmovd xmm load", &r, &w, 16);
+        asm volatile("vmovups %0, %%zmm17\n\tvmovdqu (%1), %%ymm4\n\tvmovdqu (%2), %%ymm3\n\tvpmaskmovd %%ymm3, %%ymm4, (%3)"
+                     : : "m"(a), "r"(mk), "r"(mv), "r"(md + 5) : "xmm3", "xmm4", "xmm17", "memory");
+        memcpy(&r, md, 64);
+        for (int i = 0; i < 16; i++) w.u[i] = 0xdead0000u + i;
+        for (int i = 0; i < 8; i++) if (mk[i] < 0) w.u[5 + i] = mv[i];
+        check("vpmaskmovd ymm store to an unaligned address", &r, &w, 16);
+        for (int i = 0; i < 24; i++) md[i] = 0xbeef0000u + i;
+        asm volatile("vmovups %0, %%zmm17\n\tvmovdqu (%1), %%xmm4\n\tvmovdqu (%2), %%xmm3\n\tvpmaskmovd %%xmm3, %%xmm4, (%3)"
+                     : : "m"(a), "r"(mk), "r"(mv), "r"(md + 1) : "xmm3", "xmm4", "xmm17", "memory");
+        memcpy(&r, md, 64);
+        for (int i = 0; i < 16; i++) w.u[i] = 0xbeef0000u + i;
+        for (int i = 0; i < 4; i++) if (mk[i] < 0) w.u[1 + i] = mv[i];
+        check("vpmaskmovd xmm store", &r, &w, 16);
+
+        uint64_t x = 0x8123456789abcdefull, out[4] = { 0, 0, 0, 0 };
+        asm volatile("vmovups %4, %%zmm17\n\tmov %5, %%r9\n\tmov $13, %%ecx\n\tshlx %%rcx, %%r9, %%r10\n\tmov %%r10, %0\n\t"
+                     "mov $70, %%r8d\n\tmov %%r9, %%rax\n\tshrx %%r8, %%rax, %%rcx\n\tmov %%rcx, %1\n\t"
+                     "mov $35, %%eax\n\tsarx %%eax, %%r9d, %%eax\n\tmov %%rax, %2\n\t"
+                     "mov $5, %%r10d\n\tshlx %%r10d, %%r9d, %%r9d\n\tmov %%r9, %3"
+                     : "=m"(out[0]), "=m"(out[1]), "=m"(out[2]), "=m"(out[3]) : "m"(a), "r"(x)
+                     : "rax", "rcx", "r8", "r9", "r10", "xmm17", "memory");
+        memset(&r, 0, sizeof r); memcpy(&r, out, 32);
+        memset(&w, 0, sizeof w);
+        w.q[0] = x << 13;
+        w.q[1] = x >> 6;
+        w.q[2] = (uint64_t)(uint32_t)((int32_t)(uint32_t)x >> 3);
+        w.q[3] = (uint64_t)((uint32_t)x << 5);
+        check("shlx, shrx, sarx (64 and 32 bits, rax/rcx/r8-r10)", &r, &w, 16);
     }
     if (fails) {
         printf("FAIL: %d check(s) wrong\n", fails);
