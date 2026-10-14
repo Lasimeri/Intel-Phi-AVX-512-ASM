@@ -46,7 +46,9 @@
 	.set EM_TAIL, 52			# 4 x {reg u8, wide u8, pad u16, off i32}
 	.set EM_IN, 84				# u64: the decoded instruction (IN_*)
 	.set EM_ENT, 92				# u64: its entry (EN_*)
-	.set EM_BYTES, 104
+	.set EM_NBYTES, 100			# u32: the bytes the next unaligned move touches (0: from the mask or the length, and the conversion)
+	.set EM_KVAL, 104			# u32: the last mask immediate (em_mask_imm), 0 none: the lanes an unaligned move covers
+	.set EM_BYTES, 112
 	.set EU_RAX, 1
 	.set EU_RCX, 2
 	.set EU_K, 4

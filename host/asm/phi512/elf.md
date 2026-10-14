@@ -20,6 +20,9 @@ scanned per call.
 
 ## `copy_mapped(dst, src, len)`
 
+Sets `copy_mapped_pages`, a bit per 4 KiB page of the source's first
+64 KiB that was readable, for a unit's page bitmap ([`region.md`](region.md)).
+
 The parts of `[src, src + len)` the program has mapped readable, copied
 to `dst` at the same offsets: a 2 MiB chunk staged for the card where an
 array may start or end inside it with nothing, a guard page or another

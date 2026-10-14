@@ -502,6 +502,8 @@ wu_ensure:
 	movq %r12, %rsi
 	movl $UNIT, %edx
 	call copy_mapped
+	movzwl copy_mapped_pages(%rip), %eax
+	movw %ax, WU_PAGES(%rbx)		# the readable pages only (a PROT_NONE page is in the maps but not writable)
 	# the need on card 0: the chunk and the unit's bit, class 1 (written back)
 	xorl %edi, %edi
 	movq %r12, %rsi
@@ -562,6 +564,8 @@ wu_refresh:
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call copy_mapped
+	movzwl copy_mapped_pages(%rip), %eax
+	movw %ax, WU_PAGES(%rbx)		# the pages as mapped now (the program may have unmapped some)
 	xorl %r13d, %r13d			# page
 2:	cmpl $16, %r13d
 	jae 8f

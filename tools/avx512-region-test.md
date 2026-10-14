@@ -23,4 +23,7 @@ would be lost with it).
 
 The exercise for [`../host/asm/phi512/region.md`](../host/asm/phi512/region.md):
 on 2026-10-13 the first kernel's first region came back right ("middle
-sees sum 115") and its last region failed the stack canary compare.
+sees sum 115") and its last region failed the stack canary compare; by
+the night both kernels pass whole ("PASS: every region came back
+right", 4 regions, 1 fault, 20 ms), after the REX fix of the
+scratch-register moves (commit 365d4b3).

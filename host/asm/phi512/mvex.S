@@ -40,6 +40,8 @@ em_init:
 	movq %rax, EM_ENT(%rdi)
 	movb $0, EM_NTEMP(%rdi)
 	movb $0, EM_NTAIL(%rdi)
+	movl $0, EM_NBYTES(%rdi)
+	movl $0, EM_KVAL(%rdi)
 	movl $-1, EM_FLAGS_OUT(%rdi)
 	movq 8(%rsp), %rax
 	shrq $32, %rax
@@ -573,6 +575,7 @@ em_mov_eax:
 em_mask_imm:
 	pushq %rbx
 	movl %esi, %ebx
+	movl %esi, EM_KVAL(%rdi)
 	call em_k
 	movl %ebx, %esi
 	call em_mov_eax
@@ -885,7 +888,7 @@ em_op2i:
 # take the float16 up-conversion); a store, vpackstoreld/hd
 # (MVEX.512.66.0F38 D0/D4, D1/D5), each masked, the high half at +64.
 	.globl em_unaligned
-em_unaligned:
+em_unaligned_pair:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
@@ -1267,7 +1270,7 @@ em_lea:
 # moves (any alignment): 2, 4 or 8 qwords for 128, 256, 512 bits. The
 # branches are rel32, patched here. rax and rcx are saved first.
 	.globl em_unaligned_any
-em_unaligned_any:
+em_unaligned_any_pairs:
 	pushq %rbx
 	pushq %r12
 	pushq %r13
@@ -1466,3 +1469,4 @@ em_addr_regs:
 4:	popq %r12
 	popq %rbx
 	ret
+	.include "mvex2.S"

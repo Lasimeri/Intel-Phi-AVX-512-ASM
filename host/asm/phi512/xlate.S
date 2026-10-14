@@ -99,9 +99,9 @@ xl_forms:
 	FORM MN_Vxorpd, xl_nds, (1 | (1 << 8) | (1 << 16) | (0xef << 24)), XB_QWORD
 	FORM MN_Vandpd, xl_nds, (1 | (1 << 8) | (1 << 16) | (0xdb << 24)), XB_QWORD
 	# the shifts by immediate: NDD, the opcode's /n in the reg field
-	FORM MN_Vpslld, xl_shift_imm, 6, 0
-	FORM MN_Vpsrld, xl_shift_imm, 2, 0
-	FORM MN_Vpsrad, xl_shift_imm, 4, 0
+	FORM MN_Vpslld, xl_shift_d, 6, 0
+	FORM MN_Vpsrld, xl_shift_d, 2, 0
+	FORM MN_Vpsrad, xl_shift_d, 4, 0
 	# compares into a mask
 	FORM MN_Vpcmpeqd, xl_cmp_vec, (1 | (1 << 8) | (0 << 16) | (0x76 << 24)), 0
 	FORM MN_Vpcmpgtd, xl_cmp_vec, (1 | (1 << 8) | (0 << 16) | (0x66 << 24)), 0

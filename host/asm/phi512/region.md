@@ -46,19 +46,24 @@ region_run(uc rdi, seed rsi, entry rdx) -> eax 0 (the frame is set),
      xmm0 to xmm15 and their ymm halves), the file kept as the shadow.
 
 The unit table holds up to 1024 units with 64 KiB shadows in a 64 MiB
-arena; the mapped pages of a unit are found once (`mapped_range` per
-4 KiB page), and an unmapped page is never compared or written.
+arena; the readable pages of a unit come from `copy_mapped`
+(`copy_mapped_pages`, a bit per 4 KiB page) at residency and again at
+every refresh, so a page the program unmaps or protects after a region
+is never compared or written back (the narrow suite's page-end check
+protects its second page after the load; before this the host wrote the
+line into it and died, 2026-10-13).
 
 Verbose: a line per region (the exit kind, where the host resumes, the
 faults, the units, the lines written back, the time) and, on a fault,
 the card's exit rip, the address, the signal and code, the blob's card
 address.
 
-## State (2026-10-13 evening)
+## State (2026-10-13 night)
 
-`tools/avx512-region-test.c`: the first kernel's loop ran on the card,
-exited at its call, the host ran the callee with the right data (the
-card's writes to the stack array came back), the second region resumed
-on the card and exited at `__stack_chk_fail`: the function's canary
-compare on the card fails (the canary travels in the request to every
-thread's `fs:0x28`), the open item.
+`tools/avx512-region-test.c` passes whole on card 0 (both kernels, 4
+regions), as do the form suites `tools/avx512-f-forms-test.c` (42
+checks) and `tools/avx512-narrow-test.c` (66 checks, 97 regions): the
+stage-3 recipe gate. The silently wrong regions of the day were the
+scratch-register moves of `blob.S` and `mvex.S` with the register's
+extension in REX.B instead of REX.R (r8 to r15 moved rax), found by
+decoding a blob against the register probes.

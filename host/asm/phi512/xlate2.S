@@ -767,6 +767,11 @@ xl_widen_dq:
 	decl %eax				# the source's dwords: half the destination's lanes
 	R_MASK %eax
 	movl %eax, FR1(%rsp)
+	movl $2, %eax
+	movl FLL(%rsp), %ecx
+	shll %cl, %eax
+	shll $2, %eax
+	movl %eax, EM_NBYTES(%rbx)		# the source dwords: half the destination's lanes
 	R_UNAL FR0(%rsp), FR1(%rsp), $0, $0, $0, $0
 .Lwq_perm:
 	R_CONST .Lc_idx_dq, .Lwq_notemp
@@ -1683,10 +1688,12 @@ xl_movlh:
 	R_TEMP .Lml_notemp
 	movl %eax, %r14d
 	R_VMOV %r14d, $RM_REG, FS1(%rsp)
+	movl $8, EM_NBYTES(%rbx)
 	R_UNAL %r14d, FR0(%rsp), $0, $0, $0, $0
 	R_COMMIT FD(%rsp), %r14d, $0
 	R_OK
 .Lml_store:
+	movl $8, EM_NBYTES(%rbx)
 	R_UNAL FD(%rsp), FR0(%rsp), $0, $1, $0, $0
 	R_OK
 .Lml_notemp:
@@ -1727,11 +1734,17 @@ xl_widen_bw:
 	movl %eax, FR4(%rsp)
 	testb $H_MEM, IN_HAS(%r12)
 	jz .Lwb_reg
+	movl $16, %eax
+	cmpl $0, FLL(%rsp)
+	jne 1f
+	movl $8, %eax
+1:	movl %eax, EM_NBYTES(%rbx)
 	movl XF_A(%r13), %eax
 	R_UNAL %r15d, FR4(%rsp), $0, $0, $0, %rax
 	cmpl $0, FR2(%rsp)
 	je .Lwb_perm
 	addq $16, IN_DISP(%r12)
+	movl $16, EM_NBYTES(%rbx)
 	movl XF_A(%r13), %eax
 	R_UNAL FR2(%rsp), FR4(%rsp), $0, $0, $0, %rax
 	subq $16, IN_DISP(%r12)
@@ -1909,6 +1922,11 @@ xl_cvtps2pd:
 	R_LANES $1
 	R_MASK %eax
 	movl %eax, FR0(%rsp)
+	movl $2, %eax
+	movl FLL(%rsp), %ecx
+	shll %cl, %eax
+	shll $2, %eax
+	movl %eax, EM_NBYTES(%rbx)		# the floats: half the lanes
 	R_UNAL %r15d, FR0(%rsp), $0, $0, $0, $0
 .Lp2d_src:
 	movl FD(%rsp), %r14d
@@ -3362,3 +3380,46 @@ xl_cmpq_vec:
 	leaq s_no_temp(%rip), %rax
 .Lcqv_out:
 	R_LEAVE
+
+# xl_shift_xmm: vpslld (XF_A 6), vpsrld (2), vpsrad (4) by the count in
+# an xmm register or memory: the count broadcast to every lane (the low
+# dword of the xmm: vpermf32x4 then vpshufd; from memory, a broadcast),
+# then the card's variable shift (a count of 32 or more gives zero, or
+# the sign, as AVX-512 does; the count's high dword other than zero
+# means a count of 32 or more). (rewrite.rs shift_by_xmm.)
+xl_shift_xmm:
+	R_ENTER
+	R_TEMP .Lsx_notemp
+	movl %eax, %r15d			# t: the count
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lsx_reg
+	R_BCASTM %r15d, $0, $0
+	jmp .Lsx_shift
+.Lsx_reg:
+	R_VPERMF %r15d, $RM_REG, FRM(%rsp), $0
+	R_VPSHUFD %r15d, $RM_REG, %r15d, $0
+.Lsx_shift:
+	R_TEMP .Lsx_notemp
+	movl %eax, %r14d			# r
+	movl $0x47, %eax			# vpsllvd
+	cmpl $6, XF_A(%r13)
+	je .Lsx_op
+	movl $0x45, %eax			# vpsrlvd
+	cmpl $2, XF_A(%r13)
+	je .Lsx_op
+	movl $0x46, %eax			# vpsravd
+.Lsx_op:
+	movl %eax, FR0(%rsp)
+	R_I38 FR0(%rsp), %r14d, FS1(%rsp), $RM_REG, %r15d
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lsx_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+# xl_shift_d: vpslld, vpsrld, vpsrad: by immediate (xl_shift_imm) or by
+# the count in xmm (xl_shift_xmm).
+xl_shift_d:
+	movq EM_IN(%rdi), %rax
+	testb $H_IMM, IN_HAS(%rax)
+	jz xl_shift_xmm
+	jmp xl_shift_imm
