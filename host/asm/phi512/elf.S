@@ -786,3 +786,81 @@ chunk_immutable:
 	jmp 2b
 9:	xorl %eax, %eax
 	ret
+
+# plt_name(stub rdi): the symbol a PLT stub jumps to (the stub's GOT slot,
+# found in a RELA section of its object's file, the symbol of that
+# relocation in the linked .dynsym, its name in that table's strings), in
+# rax; 0 when it is not a stub or nothing matches. For blob.S: a call to
+# memcpy, memmove or memset through the PLT becomes an inline copy on the
+# card (2026-10-14: ggml_graph_compute_thread's memcpy calls were ~950
+# card round trips every 5 s).
+	.globl plt_name
+plt_name:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rdi, %rcx				# the GOT slot from the stub (as plt_resolve reads it)
+	cmpl $0xfa1e0ff3, (%rcx)
+	jne 1f
+	addq $4, %rcx
+	cmpb $0xf2, (%rcx)
+	jne 1f
+	incq %rcx
+1:	cmpw $0x25ff, (%rcx)
+	jne 8f
+	movslq 2(%rcx), %rdx
+	leaq 6(%rcx,%rdx), %r12			# the slot's address
+	movq %rbx, %rdi
+	call obj_at
+	testq %rax, %rax
+	jz 8f
+	movq OBJ_MAP(%rax), %r13		# the file
+	testq %r13, %r13
+	jz 8f
+	subq OBJ_BASE(%rax), %r12		# the slot as an r_offset
+	movq 0x28(%r13), %r14			# e_shoff
+	addq %r13, %r14				# the section headers
+	movzwl 0x3c(%r13), %r15d		# e_shnum
+2:	testl %r15d, %r15d
+	jz 8f
+	decl %r15d
+	movl %r15d, %eax
+	shll $6, %eax				# 64 bytes a header
+	leaq (%r14,%rax), %rbx			# this header
+	cmpl $4, 4(%rbx)			# SHT_RELA
+	jne 2b
+	movq 0x18(%rbx), %rcx
+	addq %r13, %rcx				# its entries
+	movq 0x20(%rbx), %rdx			# its bytes
+3:	cmpq $24, %rdx
+	jb 2b
+	cmpq (%rcx), %r12
+	je 4f
+	addq $24, %rcx
+	subq $24, %rdx
+	jmp 3b
+4:	movq 8(%rcx), %rax
+	shrq $32, %rax				# the symbol's index
+	movl 0x28(%rbx), %edx			# sh_link: the symbol table
+	shll $6, %edx
+	leaq (%r14,%rdx), %rdx			# its header
+	imulq $24, %rax, %rax
+	addq 0x18(%rdx), %rax
+	addq %r13, %rax				# the symbol
+	movl (%rax), %eax			# st_name
+	movl 0x28(%rdx), %edx			# its sh_link: the strings
+	shll $6, %edx
+	movq 0x18(%r14,%rdx), %rdx
+	addq %r13, %rdx
+	addq %rdx, %rax				# the name
+	jmp 9f
+8:	xorl %eax, %eax
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret

@@ -133,6 +133,8 @@ blob_build:
 	# locked without one) is the host's: on the card it would be atomic on
 	# the card's copy alone, and the program's other threads would lose
 	# their updates to the word (2026-10-14)
+	cmpq $0, card_atomics(%rip)		# PHI512_CARD_ATOMICS=1 (one compute thread: nothing else touches
+	jne 15f					# ggml's counters): the card runs the atomic on its copy, the write-back carries it
 	testb $IXF_LOCK, IX_FLAGS(%r14)
 	jnz .Lref_lock
 	cmpb $0, IN_ENC(%rdx)
@@ -500,7 +502,36 @@ blob_build:
 # A direct call (inside the object or into the PLT): X_CALL at the call
 # site, the callee as the aux.
 .Lcall:
+	# memcpy, memmove, memset through the PLT: done inline on the card
+	cmpq $0, plt_resolve_off(%rip)
+	jne 1f
 	movq IX_TGT(%r14), %rdi
+	call plt_name
+	testq %rax, %rax
+	jz 1f
+	pushq %rax
+	pushq %rax
+	movq %rax, %rdi
+	leaq .Ls_memcpy(%rip), %rsi
+	call .Lstreq
+	movl %eax, %ecx
+	movq (%rsp), %rdi
+	leaq .Ls_memmove(%rip), %rsi
+	pushq %rcx
+	pushq %rcx
+	call .Lstreq
+	popq %rcx
+	popq %rcx
+	orl %eax, %ecx
+	popq %rdi
+	popq %rdi
+	testl %ecx, %ecx
+	jnz .Linl_move
+	leaq .Ls_memset(%rip), %rsi
+	call .Lstreq
+	testl %eax, %eax
+	jnz .Linl_set
+1:	movq IX_TGT(%r14), %rdi
 	call plt_resolve				# through a PLT stub: the function it reaches (the card's table holds functions)
 	movl $S_XFER, %ecx
 	call .Lseq_slot
@@ -616,6 +647,67 @@ blob_build:
 	call .Lseq_kind
 	call .Lseq_jmp
 	jmp .Ladvance
+
+# memcpy/memmove inline (rdi dst, rsi src, rdx n; rax = dst; rcx, r11,
+# rsi, rdi and the flags clobbered, as a call may): backward when the
+# ranges overlap with dst above src, forward otherwise; rep movsb.
+.Linl_move:
+	leaq .Lb_memmove(%rip), %rsi
+	movl $38, %edx
+	call .Lput
+	incq stat_inline_mem(%rip)
+	jmp .Ladvance
+# memset inline (rdi dst, esi byte, rdx n; rax = dst): rep stosb.
+.Linl_set:
+	leaq .Lb_memset(%rip), %rsi
+	movl $13, %edx
+	call .Lput
+	incq stat_inline_mem(%rip)
+	jmp .Ladvance
+# .Lstreq(a rdi, b rsi): eax 1 when the two strings are equal.
+.Lstreq:
+	xorl %ecx, %ecx
+1:	movb (%rdi,%rcx), %al
+	cmpb (%rsi,%rcx), %al
+	jne 8f
+	testb %al, %al
+	je 9f
+	incq %rcx
+	jmp 1b
+8:	xorl %eax, %eax
+	ret
+9:	movl $1, %eax
+	ret
+	.section .rodata
+.Ls_memcpy:	.asciz "memcpy"
+.Ls_memmove:	.asciz "memmove"
+.Ls_memset:	.asciz "memset"
+.Lb_memmove:
+	.byte 0x48, 0x89, 0xf8			# mov rax, rdi
+	.byte 0x48, 0x89, 0xd1			# mov rcx, rdx
+	.byte 0x48, 0x39, 0xf7			# cmp rdi, rsi
+	.byte 0x76, 0x19			# jbe forward
+	.byte 0x4c, 0x8d, 0x1c, 0x16		# lea r11, [rsi + rdx]
+	.byte 0x4c, 0x39, 0xdf			# cmp rdi, r11
+	.byte 0x73, 0x10			# jae forward
+	.byte 0xfd				# std
+	.byte 0x48, 0x8d, 0x74, 0x16, 0xff	# lea rsi, [rsi + rdx - 1]
+	.byte 0x48, 0x8d, 0x7c, 0x17, 0xff	# lea rdi, [rdi + rdx - 1]
+	.byte 0xf3, 0xa4			# rep movsb
+	.byte 0xfc				# cld
+	.byte 0xeb, 0x02			# jmp done
+	.byte 0xf3, 0xa4			# forward: rep movsb
+.Lb_memset:
+	.byte 0x49, 0x89, 0xfb			# mov r11, rdi
+	.byte 0x89, 0xf0			# mov eax, esi
+	.byte 0x48, 0x89, 0xd1			# mov rcx, rdx
+	.byte 0xf3, 0xaa			# rep stosb
+	.byte 0x4c, 0x89, 0xd8			# mov rax, r11
+	.bss
+	.balign 8
+	.globl stat_inline_mem
+stat_inline_mem:	.skip 8
+	.text
 
 # A return: the return address popped into S_SITE, X_JUMP.
 .Lret:
@@ -1280,4 +1372,9 @@ plt_resolve:
 	.balign 8
 	.globl plt_resolve_off
 plt_resolve_off:	.skip 8			# 1: plt_resolve gives the address as it is (tools/xlate-check sets it)
+	.text
+	.bss
+	.balign 8
+	.globl card_atomics
+card_atomics:	.skip 8			# PHI512_CARD_ATOMICS=1: locked instructions copied into the blob (main.S)
 	.text

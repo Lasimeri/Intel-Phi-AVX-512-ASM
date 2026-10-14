@@ -318,6 +318,38 @@ static long caller8(const int *a, int n, int (*f)(const int *))
     return t;
 }
 
+
+/* kernel9: memcpy, memmove (overlapping both ways) and memset called
+ * through the PLT from an AVX-512 function: the blob does them inline on
+ * the card (2026-10-14: the graph thread's memcpy calls were a card
+ * round trip each). The sizes come from the caller, so gcc keeps the
+ * calls. */
+__attribute__((noinline))
+static float kernel9(float *x, unsigned char *b, size_t n1, size_t n2, size_t n3)
+{
+    for (int i = 0; i < 64; i++) x[i] = x[i] * 1.5f + 0.25f;
+    memcpy(b + 300, b + 7, n1);
+    memmove(b + 40, b + 30, n2);
+    memmove(b + 100, b + 120, n2);
+    memset(b + 200, 0x5a, n3);
+    float s = 0;
+    for (int i = 0; i < 64; i++) s += x[i];
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float kernel9_ref(float *x, unsigned char *b, size_t n1, size_t n2, size_t n3)
+{
+    for (int i = 0; i < 64; i++) x[i] = x[i] * 1.5f + 0.25f;
+    memcpy(b + 300, b + 7, n1);
+    memmove(b + 40, b + 30, n2);
+    memmove(b + 100, b + 120, n2);
+    memset(b + 200, 0x5a, n3);
+    float s = 0;
+    for (int i = 0; i < 64; i++) s += x[i];
+    return s;
+}
+
 /* main itself has no AVX-512 code: the inputs come from a scalar helper
  * (gcc would vectorise the loop in main with forms the kernels never
  * use). */
@@ -380,6 +412,14 @@ int main(void)
     for (int c = 0; c < 3; c++) { r8 += caller8(a8, 100, isum8); w8 += caller8(a8, 100, isum8_ref); }
     if (r8 != w8) { printf("FAIL kernel8: got %ld want %ld\n", r8, w8); fails++; }
     else printf("ok   kernel8 (a plain caller of an AVX-512 function, promoted: %ld)\n", r8);
+    static float x9a[64] __attribute__((aligned(64))), x9b[64] __attribute__((aligned(64)));
+    static unsigned char b9a[512], b9b[512];
+    for (int i = 0; i < 64; i++) x9a[i] = x9b[i] = (float)(i % 9) * 0.5f;
+    for (int i = 0; i < 512; i++) b9a[i] = b9b[i] = (unsigned char)(i * 37 + 11);
+    volatile size_t n9a = 150, n9b = 57, n9c = 77;
+    float r9 = kernel9(x9a, b9a, n9a, n9b, n9c), w9 = kernel9_ref(x9b, b9b, n9a, n9b, n9c);
+    if (r9 != w9 || memcmp(b9a, b9b, sizeof b9a) || memcmp(x9a, x9b, sizeof x9a)) { printf("FAIL kernel9: got %g want %g, bytes %s\n", r9, w9, memcmp(b9a, b9b, sizeof b9a) ? "differ" : "equal"); fails++; }
+    else printf("ok   kernel9 (memcpy, memmove both ways and memset through the PLT, inline on the card: %g)\n", r9);
     printf("%s\n", fails ? "FAIL" : "PASS: every region came back right");
     return fails != 0;
 }

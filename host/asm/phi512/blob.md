@@ -102,3 +102,18 @@ stub that now reaches a function with a blob is registered on every card
 as that blob's (`card.S card_alias`: `K_LOAD` with no bytes and the key in
 `fill_off`; card `fexec.S` inserts it in the in-card call table), once per
 stub.
+
+## memcpy, memmove, memset inline; atomics on the card for one thread (2026-10-14)
+
+- A call through a PLT stub whose symbol (`elf.S plt_name`: the stub's
+  GOT slot found in a RELA section of the object's file, its `.dynsym`
+  name) is `memcpy` or `memmove` becomes 38 bytes of inline code (rax =
+  dst; backward `rep movsb` under `std` when the ranges overlap with dst
+  above src, forward otherwise), `memset` 13 (`rep stosb`). The graph
+  thread's `memcpy` calls were a card round trip each (~1,000 every 5 s
+  in llama-server's first decode). Region test kernel9.
+- `PHI512_CARD_ATOMICS=1`: a locked instruction (and `xchg` with memory)
+  is copied into the blob: the card runs it on its copy and the
+  write-back carries the result. Only for one compute thread (`-t 1`):
+  nothing else then touches ggml's threadpool counters. Off by default:
+  the host runs atomics (one step back to the card after).

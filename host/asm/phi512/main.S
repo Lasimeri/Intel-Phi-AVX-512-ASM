@@ -25,6 +25,7 @@ s_env_promote:	.asciz "PHI512_PROMOTE"
 s_env_cont:	.asciz "PHI512_CONT"
 s_env_tany:	.asciz "PHI512_TRAMP_ANY"
 s_env_dirty:	.asciz "PHI512_DIRTY"
+s_env_catom:	.asciz "PHI512_CARD_ATOMICS"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -116,6 +117,10 @@ phi512_init:
 	testq %rax, %rax
 	sete %cl
 	movq %rcx, dt_off(%rip)
+	leaq s_env_catom(%rip), %rdi		# PHI512_CARD_ATOMICS=1: atomics run on the card (blob.S; one compute thread only)
+	xorl %esi, %esi
+	call env_u64
+	movq %rax, card_atomics(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f
