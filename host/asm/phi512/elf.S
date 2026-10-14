@@ -336,6 +336,7 @@ elf_func_at:
 	pushq %r14
 	pushq %r15
 	subq $8, %rsp				# the object's entry
+	movq $0, (%rsp)				# (none: the fallback below reads it)
 	movq %rdi, %r15
 	call obj_at
 	testq %rax, %rax
@@ -439,6 +440,8 @@ eh_func_at:
 	movq %rdi, %rbx
 	movq %rsi, %r12
 	movq OBJ_MAP(%rbx), %rax
+	testq %rax, %rax
+	jz 8f					# the object's file not mapped (lb6: a fault at 0x20 here, 2026-10-14)
 	movq EH_PHOFF(%rax), %rcx
 	addq %rax, %rcx				# the program headers (in the file mapping)
 	movzwl EH_PHNUM(%rax), %edx
