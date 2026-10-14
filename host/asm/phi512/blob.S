@@ -385,7 +385,10 @@ blob_build:
 	movb %al, IN_BASE(%rdx)
 	movq $0, IN_DISP(%rdx)
 	andb $~H_RIPREL, IN_HAS(%rdx)
-1:	movq %rbx, %rdi
+1:	movl IX_OFF(%r14), %eax
+	leaq (%r13,%rax), %rax
+	movq %rax, F_IN + IN_SRC(%rsp)		# the bytes, for a recipe that copies them
+	movq %rbx, %rdi
 	leaq F_IN(%rsp), %rsi
 	call xl_insn
 	testq %rax, %rax
@@ -864,6 +867,7 @@ blob_build:
 	movl 24(%rsp), %edx
 	shrl $3, %edx
 	andl $1, %edx
+	shll $2, %edx				# REX.R: the register is in the reg field (REX.B would be the r/m)
 	orl %edx, %eax
 	testl %eax, %eax
 	jz 1f

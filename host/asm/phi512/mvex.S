@@ -473,6 +473,7 @@ em_gpr_scratch:
 	movl %ebx, %edx
 	shrl $3, %edx
 	andl $1, %edx
+	shll $2, %edx				# REX.R: the register is in the reg field
 	orl %edx, %eax
 	testl %eax, %eax
 	jz 1f

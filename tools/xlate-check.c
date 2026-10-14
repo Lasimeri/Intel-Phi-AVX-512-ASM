@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../host/asm/phi512/x86tab.h"
 
 struct obj { uint64_t lo, hi, plt_lo, plt_hi; };
 struct fn {
@@ -49,6 +50,7 @@ struct blob {
 };
 extern uint64_t fn_scan(const void *bytes, uint64_t size, uint64_t addr, struct fn *out, const struct obj *ob, void *index);
 extern uint64_t blob_build(struct blob *bl, struct fn *fn, const void *bytes, const struct obj *ob);
+extern uint64_t x86_decode(const void *bytes, uint64_t avail, void *out, uint64_t addr);
 
 #define SCRATCH_TPOFF 0x1000
 
@@ -109,7 +111,9 @@ int main(int argc, char **argv)
 	bl.scratch = SCRATCH_TPOFF;
 	rc = blob_build(&bl, &fn, bytes, &ob);
 	if (rc) {
-		printf("REFUSED at +%u: %s\n", bl.refused_off, bl.refused);
+		struct { uint8_t b[72]; const struct x86_ent *ent; uint64_t pad[2]; } in;
+		uint64_t n = x86_decode(bytes + bl.refused_off, s->st_size - bl.refused_off, &in, s->st_value + bl.refused_off);
+		printf("REFUSED at +%u: %s (%s)\n", bl.refused_off, bl.refused, n && in.ent ? x86_mnem_str + x86_mnem_off[in.ent->mnem] : "?");
 		return 1;
 	}
 	size_t len = bl.out - bl.code;

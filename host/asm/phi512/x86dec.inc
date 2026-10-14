@@ -41,6 +41,7 @@
 	.set IN_TARGET, 56			# u64: a relative branch's target
 	.set IN_NEXT, 64			# u64: the next instruction's address
 	.set IN_ENTRYP, 72			# u64: pointer to the entry, 0 none
+	.set IN_SRC, 80				# u64: the instruction's bytes (blob.S sets it for the recipes; 0 elsewhere)
 	.set IN_BYTES, 96
 
 # IN_HAS bits.

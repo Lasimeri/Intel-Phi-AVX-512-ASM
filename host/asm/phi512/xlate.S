@@ -86,7 +86,7 @@ xl_forms:
 	FORM MN_Vpsllvd, xl_nds, (2 | (1 << 8) | (0 << 16) | (0x47 << 24)), 0
 	FORM MN_Vpsrlvd, xl_nds, (2 | (1 << 8) | (0 << 16) | (0x45 << 24)), 0
 	FORM MN_Vpsravd, xl_nds, (2 | (1 << 8) | (0 << 16) | (0x46 << 24)), 0
-	FORM MN_Vpermd, xl_nds, (2 | (1 << 8) | (0 << 16) | (0x36 << 24)), 0
+	FORM MN_Vpermd, xl_permd2, 0, 0
 	# the VEX names of the same operations (vpand, vpor, vpxor, vpadd): 128- and 256-bit forms
 	FORM MN_Vpand, xl_nds, (1 | (1 << 8) | (0 << 16) | (0xdb << 24)), 0
 	FORM MN_Vpandn, xl_nds, (1 | (1 << 8) | (0 << 16) | (0xdf << 24)), 0
@@ -103,12 +103,12 @@ xl_forms:
 	FORM MN_Vpsrld, xl_shift_imm, 2, 0
 	FORM MN_Vpsrad, xl_shift_imm, 4, 0
 	# compares into a mask
-	FORM MN_Vpcmpeqd, xl_cmp_k, (1 | (1 << 8) | (0 << 16) | (0x76 << 24)), 0
-	FORM MN_Vpcmpgtd, xl_cmp_k, (1 | (1 << 8) | (0 << 16) | (0x66 << 24)), 0
-	FORM MN_Vpcmpd, xl_cmp_k, (3 | (1 << 8) | (0 << 16) | (0x1f << 24)), XB_IMM
-	FORM MN_Vpcmpud, xl_cmp_k, (3 | (1 << 8) | (0 << 16) | (0x1e << 24)), XB_IMM
-	FORM MN_Vcmpps, xl_cmp_k, (1 | (0 << 8) | (0 << 16) | (0xc2 << 24)), XB_IMM | XB_FLOAT
-	FORM MN_Vcmppd, xl_cmp_k, (1 | (1 << 8) | (1 << 16) | (0xc2 << 24)), XB_IMM | XB_FLOAT | XB_QWORD
+	FORM MN_Vpcmpeqd, xl_cmp_vec, (1 | (1 << 8) | (0 << 16) | (0x76 << 24)), 0
+	FORM MN_Vpcmpgtd, xl_cmp_vec, (1 | (1 << 8) | (0 << 16) | (0x66 << 24)), 0
+	FORM MN_Vpcmpd, xl_cmp_k2, (3 | (1 << 8) | (0 << 16) | (0x1f << 24)), XB_IMM
+	FORM MN_Vpcmpud, xl_cmp_k2, (3 | (1 << 8) | (0 << 16) | (0x1e << 24)), XB_IMM
+	FORM MN_Vcmpps, xl_cmp_vec, (1 | (0 << 8) | (0 << 16) | (0xc2 << 24)), XB_IMM | XB_FLOAT
+	FORM MN_Vcmppd, xl_cmp_vec, (1 | (1 << 8) | (1 << 16) | (0xc2 << 24)), XB_IMM | XB_FLOAT | XB_QWORD
 	# moves
 	FORM MN_Vmovaps, xl_mov_aligned, 0, 0
 	FORM MN_Vmovapd, xl_mov_aligned, 0, XB_QWORD
@@ -137,7 +137,7 @@ xl_forms:
 	FORM MN_Vextracti64x2, xl_extract, 0, 0
 	FORM MN_Vextractf128, xl_extract, 0, 0
 	FORM MN_Vextracti128, xl_extract, 0, 0
-	FORM MN_Vpermilps, xl_permilps, 0, 0
+	FORM MN_Vpermilps, xl_permilps2, 0, 0
 	FORM MN_Vpshufd, xl_permilps, 0, 0
 	FORM MN_Vshufps, xl_shufps, 0, 0
 	FORM MN_Vmovss, xl_movss, 0, 0
@@ -148,9 +148,9 @@ xl_forms:
 	FORM MN_Vaddsd, xl_scalar, (1 | (1 << 8) | (1 << 16) | (0x58 << 24)), XB_QWORD
 	FORM MN_Vsubsd, xl_scalar, (1 | (1 << 8) | (1 << 16) | (0x5c << 24)), XB_QWORD
 	FORM MN_Vmulsd, xl_scalar, (1 | (1 << 8) | (1 << 16) | (0x59 << 24)), XB_QWORD
-	FORM MN_Vfmadd132ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0x99 << 24)), 0
-	FORM MN_Vfmadd213ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xa9 << 24)), 0
-	FORM MN_Vfmadd231ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xb9 << 24)), 0
+	FORM MN_Vfmadd132ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0x98 << 24)), 0
+	FORM MN_Vfmadd213ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xa8 << 24)), 0
+	FORM MN_Vfmadd231ss, xl_scalar, (2 | (1 << 8) | (0 << 16) | (0xb8 << 24)), 0
 	# interleaves: per block two vpshufd (the immediates) and the lanes taken from the second source
 	FORM MN_Vunpcklps, xl_interleave, (0x50 | (0x50 << 8) | (0xaaaa << 16)), 0
 	FORM MN_Vunpckhps, xl_interleave, (0xfa | (0xfa << 8) | (0xaaaa << 16)), 0
@@ -182,8 +182,8 @@ xl_forms:
 	FORM MN_Vinserti64x4, xl_insert, 1, 0
 	FORM MN_Vinsertf64x4, xl_insert, 1, 0
 	# the scalar conversions and the operations the card has no instruction for (x87)
-	FORM MN_Vcvtsi2ss, xl_cvtsi2s, 0, 0
-	FORM MN_Vcvtsi2sd, xl_cvtsi2s, 1, 0
+	FORM MN_Vcvtsi2ss, xl_cvti2s, 0, 0
+	FORM MN_Vcvtsi2sd, xl_cvti2s, 1, 0
 	FORM MN_Vcvtss2sd, xl_cvtss2sd, 0, 0
 	FORM MN_Vcvtsd2ss, xl_cvtss2sd, 1, 0
 	FORM MN_Vdivss, xl_divs, 0, 0
@@ -1306,6 +1306,7 @@ xl_ternlog:
 	andl $XB_QWORD, %r14d
 	testb $H_MEM, IN_HAS(%r12)
 	jnz .Ltern_mem
+.Ltern_reg:
 	movzbl IN_IMM(%r12), %r15d		# the table: bit (d << 2 | s1 << 1 | s2)
 	# f0 = bits 0..3 (d = 0), f1 = bits 4..7 (d = 1), each a function of (s1, s2) with bit (s1 << 1 | s2)
 	movl %r15d, %eax
@@ -1406,8 +1407,17 @@ xl_ternlog:
 	xorl %eax, %eax
 	jmp .Ltern_out
 .Ltern_mem:
-	leaq s_ternlog(%rip), %rax
-	jmp .Ltern_out
+	# the memory operand (or a broadcast) staged into a temporary, then the register path on it
+	movq %rbx, %rdi
+	movl %r14d, %esi
+	xorl %edx, %edx
+	call src2
+	testl %eax, %eax
+	js .Ltern_notemp
+	movb %al, IN_RM(%r12)
+	andb $~H_MEM, IN_HAS(%r12)
+	movb $0, IN_B(%r12)
+	jmp .Ltern_reg
 .Ltern_notemp:
 	leaq s_no_temp(%rip), %rax
 .Ltern_out:
@@ -2071,20 +2081,7 @@ xl_scalar:
 	movl $RM_REG, %esi
 	movzbl IN_RM(%r12), %edx
 	call mv_rm
-3:	# d's lanes 1..3 from s1 first when d != s1 (the op does not touch them)
-	movzbl IN_REG(%r12), %eax
-	cmpb IN_VVVV(%r12), %al
-	je 4f
-	movq %rbx, %rdi
-	movl $0x000f, %esi
-	call em_mask_imm
-	movq %rbx, %rdi
-	movzbl IN_REG(%r12), %esi
-	movl $RM_REG, %edx
-	movzbl IN_VVVV(%r12), %ecx
-	movl %eax, %r8d
-	xorl %r9d, %r9d
-	call em_vmov
+3:	# (the rest of the low 128 bits come from s1 after the operation: lane 0 is its addend)
 4:	# the lane mask (and {k})
 	movq %rbx, %rdi
 	movl %r15d, %esi
@@ -2101,7 +2098,24 @@ xl_scalar:
 	movq %rbx, %rdi
 	movq %rsp, %rsi
 	call em_mvex
-6:	movq %rbx, %rdi
+6:	# lanes 1 to 3 (lane 1 for sd) from s1 when d is another register
+	movzbl IN_REG(%r12), %eax
+	cmpb IN_VVVV(%r12), %al
+	je 61f
+	movl $0xe, %esi
+	testl %r14d, %r14d
+	jz 60f
+	movl $0x2, %esi
+60:	movq %rbx, %rdi
+	call em_mask_imm
+	movq %rbx, %rdi
+	movzbl IN_REG(%r12), %esi
+	movl $RM_REG, %edx
+	movzbl IN_VVVV(%r12), %ecx
+	movl %eax, %r8d
+	movl %r14d, %r9d
+	call em_vmov
+61:	movq %rbx, %rdi
 	movzbl IN_REG(%r12), %esi
 	movl $0xfff0, %edx
 	call em_zero_lanes

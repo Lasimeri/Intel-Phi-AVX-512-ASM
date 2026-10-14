@@ -12,7 +12,7 @@
 # The frame of a recipe: the MVEX argument block at 0, the instruction's
 # fields as dwords, six 8-byte slots. R_FRAME keeps the stack 16-aligned
 # at the calls (five pushes before it).
-	.set R_FRAME, 112
+	.set R_FRAME, 176
 	.set FD, MV_BYTES			# IN_REG
 	.set FS1, MV_BYTES + 4			# IN_VVVV
 	.set FRM, MV_BYTES + 8			# IN_RM
@@ -24,6 +24,7 @@
 	.set FR3, MV_BYTES + 48
 	.set FR4, MV_BYTES + 56
 	.set FR5, MV_BYTES + 64
+	.set FBUF, MV_BYTES + 72		# 64 bytes: a constant built here, then em_const
 
 	.macro R_ENTER
 	pushq %rbx
@@ -1067,7 +1068,10 @@ xl_shuf_blocks:
 	movl %eax, FR1(%rsp)
 	R_VPERMF %r14d, $RM_REG, %r15d, FR1(%rsp), FR2(%rsp)
 .Lsb_commit:
-	R_COMMIT FD(%rsp), %r14d, $0
+	movl XF_B(%r13), %eax
+	andl $XB_QWORD, %eax
+	movl %eax, FR3(%rsp)
+	R_COMMIT FD(%rsp), %r14d, FR3(%rsp)
 	R_OK
 .Lsb_shape:
 	leaq s_shape(%rip), %rax
@@ -1391,3 +1395,1970 @@ s2_byteshift:	.asciz "a byte shift within 128-bit blocks that is not a whole num
 	.balign 64
 .Lc_idx_dq:	.long 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7
 	.text
+
+# ---- batch 2b: blends, the word forms, the byte-to-word widening, the saturating packs ----
+
+	.macro R_CONST_BUF fail
+	movq %rbx, %rdi
+	leaq FBUF(%rsp), %rsi
+	call em_const
+	cmpl $-1, %eax
+	je \fail
+	.endm
+
+# xl_blendd: vpblendd (VEX, by immediate): r = s1; r{the immediate's
+# lanes, cut to the length} = s2.
+xl_blendd:
+	R_ENTER
+	R_SRC2 $0, $0, .Lbd_notemp
+	movl %eax, %r15d			# s2
+	R_TEMP .Lbd_notemp
+	movl %eax, %r14d			# r
+	R_VMOV %r14d, $RM_REG, FS1(%rsp)
+	R_LANES $0
+	movl %eax, FR1(%rsp)
+	movzbl IN_IMM(%r12), %eax
+	andl FR1(%rsp), %eax
+	R_MASK %eax
+	movl %eax, FR0(%rsp)
+	R_VMOV %r14d, $RM_REG, %r15d, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lbd_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_blendw: vpblendw (by immediate): bit i of the immediate takes word
+# i of every 128-bit block from the second source: a constant M of word
+# masks (dword j of a block: 0xffff for bit 2j, 0xffff0000 for bit
+# 2j + 1), then r = (s1 and not M) or (s2 and M).
+xl_blendw:
+	R_ENTER
+	R_SRC2 $0, $0, .Lbw_notemp
+	movl %eax, %r15d			# s2
+	R_TEMP .Lbw_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lbw_notemp
+	movl %eax, FR0(%rsp)			# u: the mask vector
+	movzbl IN_IMM(%r12), %edx
+	xorl %ecx, %ecx				# j
+.Lbw_const:
+	movl %edx, %eax
+	andl $3, %eax				# the two bits of word pair j
+	shrl $2, %edx
+	leaq .Lbw_tab(%rip), %rsi
+	movl (%rsi,%rax,4), %eax
+	movl %eax, FBUF(%rsp,%rcx,4)
+	movl %eax, FBUF + 16(%rsp,%rcx,4)
+	movl %eax, FBUF + 32(%rsp,%rcx,4)
+	movl %eax, FBUF + 48(%rsp,%rcx,4)
+	incl %ecx
+	cmpl $4, %ecx
+	jb .Lbw_const
+	R_CONST_BUF .Lbw_notemp
+	movl %eax, FR1(%rsp)
+	R_VMOV FR0(%rsp), $RM_CONST, FR1(%rsp)			# u = M
+	R_I0F $0xdf, %r14d, FR0(%rsp), $RM_REG, FS1(%rsp)	# r = not u and s1
+	R_I0F $0xdb, FR0(%rsp), FR0(%rsp), $RM_REG, %r15d	# u = u and s2
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR0(%rsp)		# r = r or u
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lbw_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_blendv: vblendvps (XF_A 0), vblendvpd (1), vpblendvb (2): the
+# blend by the sign bits of a fourth register (imm[7:4]): the mask
+# vector u is every element's sign spread over it (a dword's by an
+# arithmetic shift, a qword's from its high dword, a byte's by the
+# sign bits masked to one per byte and multiplied by 255), then
+# r = (s1 and not u) or (s2 and u).
+xl_blendv:
+	R_ENTER
+	R_SRC2 $0, $0, .Lbv_notemp
+	movl %eax, %r15d			# s2
+	R_TEMP .Lbv_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lbv_notemp
+	movl %eax, FR0(%rsp)			# u
+	movzbl IN_IMM(%r12), %eax
+	shrl $4, %eax
+	movl %eax, FR1(%rsp)			# the mask register
+	cmpl $2, XF_A(%r13)
+	je .Lbv_bytes
+	cmpl $1, XF_A(%r13)
+	jne .Lbv_dwords
+	R_VPSHUFD FR0(%rsp), $RM_REG, FR1(%rsp), $0xf5		# each qword's high dword in both lanes
+	R_SHIFT $4, FR0(%rsp), $RM_REG, FR0(%rsp), $31
+	jmp .Lbv_blend
+.Lbv_dwords:
+	R_SHIFT $4, FR0(%rsp), $RM_REG, FR1(%rsp), $31
+	jmp .Lbv_blend
+.Lbv_bytes:
+	R_SHIFT $2, FR0(%rsp), $RM_REG, FR1(%rsp), $7		# the sign bits to bit 0 of every byte
+	R_CONST_DW $0x01010101, .Lbv_notemp
+	movl %eax, FR2(%rsp)
+	R_I0F $0xdb, FR0(%rsp), FR0(%rsp), $RM_CONST, FR2(%rsp)
+	R_CONST_DW $0xff, .Lbv_notemp
+	movl %eax, FR2(%rsp)
+	R_I38 $0x40, FR0(%rsp), FR0(%rsp), $RM_CONST, FR2(%rsp)	# times 255: a byte's mask
+.Lbv_blend:
+	R_I0F $0xdf, %r14d, FR0(%rsp), $RM_REG, FS1(%rsp)	# r = not u and s1
+	R_I0F $0xdb, FR0(%rsp), FR0(%rsp), $RM_REG, %r15d	# u = u and s2
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lbv_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_shiftw: vpsrlw (XF_A 0), vpsllw (1), vpsraw (2) by immediate, the
+# destination in vvvv: the dword shift with the bits that crossed a
+# word masked off (a constant of the surviving bits per word); the
+# arithmetic form shifts each word's sign-extension separately (the
+# low word through the top of its dword). A count at or past 16 gives
+# zero, or every word its sign.
+xl_shiftw:
+	R_ENTER
+	testb $H_IMM, IN_HAS(%r12)
+	jz .Lsw_shape
+	movl FRM(%rsp), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lsw_src
+	R_SRC2 $0, $0, .Lsw_notemp
+	movl %eax, %r15d
+.Lsw_src:
+	R_TEMP .Lsw_notemp
+	movl %eax, %r14d			# r
+	movzbl IN_IMM(%r12), %eax
+	movl %eax, FR0(%rsp)			# n
+	cmpl $16, %eax
+	jb .Lsw_n
+	cmpl $2, XF_A(%r13)
+	jne .Lsw_zero
+	movl $15, FR0(%rsp)
+	jmp .Lsw_n
+.Lsw_zero:
+	R_ZERO %r14d
+	jmp .Lsw_commit
+.Lsw_n:
+	cmpl $0, XF_A(%r13)
+	jne .Lsw_left
+	R_SHIFT $2, %r14d, $RM_REG, %r15d, FR0(%rsp)
+	movl FR0(%rsp), %ecx
+	movl $0xffff, %eax
+	shrl %cl, %eax
+	imull $0x10001, %eax
+	R_CONST_DW %eax, .Lsw_notemp
+	movl %eax, FR1(%rsp)
+	R_I0F $0xdb, %r14d, %r14d, $RM_CONST, FR1(%rsp)
+	jmp .Lsw_commit
+.Lsw_left:
+	cmpl $1, XF_A(%r13)
+	jne .Lsw_arith
+	R_SHIFT $6, %r14d, $RM_REG, %r15d, FR0(%rsp)
+	movl FR0(%rsp), %ecx
+	movl $0xffff, %eax
+	shll %cl, %eax
+	andl $0xffff, %eax
+	imull $0x10001, %eax
+	R_CONST_DW %eax, .Lsw_notemp
+	movl %eax, FR1(%rsp)
+	R_I0F $0xdb, %r14d, %r14d, $RM_CONST, FR1(%rsp)
+	jmp .Lsw_commit
+.Lsw_arith:
+	R_TEMP .Lsw_notemp
+	movl %eax, FR2(%rsp)			# t: the low words
+	R_SHIFT $6, FR2(%rsp), $RM_REG, %r15d, $16
+	movl FR0(%rsp), %eax
+	addl $16, %eax
+	movl %eax, FR3(%rsp)
+	R_SHIFT $4, FR2(%rsp), $RM_REG, FR2(%rsp), FR3(%rsp)
+	R_CONST_DW $0xffff, .Lsw_notemp
+	movl %eax, FR1(%rsp)
+	R_I0F $0xdb, FR2(%rsp), FR2(%rsp), $RM_CONST, FR1(%rsp)
+	R_SHIFT $4, %r14d, $RM_REG, %r15d, FR0(%rsp)		# the high words
+	R_CONST_DW $0xffff0000, .Lsw_notemp
+	movl %eax, FR1(%rsp)
+	R_I0F $0xdb, %r14d, %r14d, $RM_CONST, FR1(%rsp)
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR2(%rsp)
+.Lsw_commit:
+	R_COMMIT FS1(%rsp), %r14d, $0
+	R_OK
+.Lsw_shape:
+	leaq s_shape(%rip), %rax
+	R_LEAVE
+.Lsw_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_addw: vpaddw (XF_A 0) and vpsubw (1): the dword sum (difference)
+# with the low word's carry (borrow) into the high word taken back:
+# t = (a and 0xffff) op (b and 0xffff), its bit 16 the carry (the
+# borrow); r = (a op b) minus (plus) that bit.
+xl_addw:
+	R_ENTER
+	R_SRC2 $0, $0, .Law_notemp
+	movl %eax, %r15d			# b
+	R_TEMP .Law_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Law_notemp
+	movl %eax, FR0(%rsp)			# t
+	R_TEMP .Law_notemp
+	movl %eax, FR1(%rsp)			# u
+	R_CONST_DW $0xffff, .Law_notemp
+	movl %eax, FR2(%rsp)
+	R_I0F $0xdb, FR0(%rsp), FS1(%rsp), $RM_CONST, FR2(%rsp)
+	R_I0F $0xdb, FR1(%rsp), %r15d, $RM_CONST, FR2(%rsp)
+	movl $0xfe, %eax
+	cmpl $0, XF_A(%r13)
+	je .Law_op
+	movl $0xfa, %eax
+.Law_op:
+	movl %eax, FR3(%rsp)			# the dword operation
+	R_I0F FR3(%rsp), FR0(%rsp), FR0(%rsp), $RM_REG, FR1(%rsp)
+	R_CONST_DW $0x10000, .Law_notemp
+	movl %eax, FR2(%rsp)
+	R_I0F $0xdb, FR0(%rsp), FR0(%rsp), $RM_CONST, FR2(%rsp)	# the carry (borrow) bit
+	R_I0F FR3(%rsp), %r14d, FS1(%rsp), $RM_REG, %r15d
+	movl $0xfa, %eax			# add: minus the carry; sub: plus the borrow
+	cmpl $0, XF_A(%r13)
+	je .Law_fix
+	movl $0xfe, %eax
+.Law_fix:
+	movl %eax, FR3(%rsp)
+	R_I0F FR3(%rsp), %r14d, %r14d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Law_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_mullw: vpmullw: the low 16 bits of each word product: the low
+# words' product masked, the high words' product shifted up.
+xl_mullw:
+	R_ENTER
+	R_SRC2 $0, $0, .Lmw_notemp
+	movl %eax, %r15d			# b
+	R_TEMP .Lmw_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lmw_notemp
+	movl %eax, FR0(%rsp)			# t
+	R_TEMP .Lmw_notemp
+	movl %eax, FR1(%rsp)			# u
+	R_CONST_DW $0xffff, .Lmw_notemp
+	movl %eax, FR2(%rsp)
+	R_I0F $0xdb, %r14d, FS1(%rsp), $RM_CONST, FR2(%rsp)
+	R_I0F $0xdb, FR0(%rsp), %r15d, $RM_CONST, FR2(%rsp)
+	R_I38 $0x40, %r14d, %r14d, $RM_REG, FR0(%rsp)		# the low products
+	R_I0F $0xdb, %r14d, %r14d, $RM_CONST, FR2(%rsp)
+	R_SHIFT $2, FR0(%rsp), $RM_REG, FS1(%rsp), $16
+	R_SHIFT $2, FR1(%rsp), $RM_REG, %r15d, $16
+	R_I38 $0x40, FR0(%rsp), FR0(%rsp), $RM_REG, FR1(%rsp)	# the high products
+	R_SHIFT $6, FR0(%rsp), $RM_REG, FR0(%rsp), $16
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lmw_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_movlh: vmovlps and vmovlpd (XF_A 0: the low qword), vmovhps and
+# vmovhpd (1: the high qword) with a memory operand: a load takes the
+# rest of the xmm from the first source and the two dwords from memory
+# through the unpack pair under the qword's lanes (a 4-byte alignment);
+# a store (the odd opcode) is the pack pair under them.
+xl_movlh:
+	R_ENTER
+	movl $0x3, %eax
+	cmpl $0, XF_A(%r13)
+	je .Lml_lanes
+	movl $0xc, %eax
+.Lml_lanes:
+	R_MASK %eax
+	movl %eax, FR0(%rsp)
+	movzbl IN_OP(%r12), %eax
+	testl $1, %eax
+	jnz .Lml_store
+	R_TEMP .Lml_notemp
+	movl %eax, %r14d
+	R_VMOV %r14d, $RM_REG, FS1(%rsp)
+	R_UNAL %r14d, FR0(%rsp), $0, $0, $0, $0
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lml_store:
+	R_UNAL FD(%rsp), FR0(%rsp), $0, $1, $0, $0
+	R_OK
+.Lml_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_widen_bw: vpmovzxbw (XF_A 4: the card's uint8 up-conversion) and
+# vpmovsxbw (5: sint8): the source's bytes (twice the destination's
+# dword count) up-converted sixteen at a time into dword vectors (from
+# memory through the unpack pair, from a register through the scratch
+# slot), then each destination dword takes byte 2i in its low word
+# (masked to 16 bits for the sign-extended form) and byte 2i + 1 in its
+# high word, by vpermd over the even and the odd lanes.
+xl_widen_bw:
+	R_ENTER
+	R_TEMP .Lwb_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lwb_notemp
+	movl %eax, %r15d			# t0: bytes 0 to 15
+	R_TEMP .Lwb_notemp
+	movl %eax, FR0(%rsp)			# o: the odd bytes
+	R_TEMP .Lwb_notemp
+	movl %eax, FR1(%rsp)			# ix
+	movl $0, FR2(%rsp)			# t1: bytes 16 to 31 (the 512-bit form), 0 none
+	cmpl $2, FLL(%rsp)
+	jne .Lwb_src
+	R_TEMP .Lwb_notemp
+	movl %eax, FR2(%rsp)
+.Lwb_src:
+	R_LANES $0
+	movl %eax, FR3(%rsp)			# the destination's lanes
+	movl $0xffff, %eax			# the bytes to convert per load: 16, or 8 for an xmm result
+	cmpl $0, FLL(%rsp)
+	jne .Lwb_cnt
+	movl $0xff, %eax
+.Lwb_cnt:
+	R_MASK %eax
+	movl %eax, FR4(%rsp)
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lwb_reg
+	movl XF_A(%r13), %eax
+	R_UNAL %r15d, FR4(%rsp), $0, $0, $0, %rax
+	cmpl $0, FR2(%rsp)
+	je .Lwb_perm
+	addq $16, IN_DISP(%r12)
+	movl XF_A(%r13), %eax
+	R_UNAL FR2(%rsp), FR4(%rsp), $0, $0, $0, %rax
+	subq $16, IN_DISP(%r12)
+	jmp .Lwb_perm
+.Lwb_reg:
+	# the source's bytes to the scratch slot (2, 4 or 8 dwords), then up-converted from it
+	popcntl FR3(%rsp), %eax
+	shrl $1, %eax
+	movl %eax, %ecx
+	movl $1, %eax
+	shll %cl, %eax
+	decl %eax
+	R_MASK %eax
+	movl %eax, FR5(%rsp)
+	R_MVEX $2, $1, $0, $0xd0, FRM(%rsp), $0, $RM_FS, $S_XFER, FR5(%rsp)
+	R_MASK FR4(%rsp)
+	movl %eax, FR4(%rsp)
+	movl XF_A(%r13), %eax
+	movl %eax, FR5(%rsp)
+	R_MVEX $1, $1, $0, $0x6f, %r15d, $0, $RM_FS, $S_XFER, FR4(%rsp), FR5(%rsp)
+	cmpl $0, FR2(%rsp)
+	je .Lwb_perm
+	R_MVEX $1, $1, $0, $0x6f, FR2(%rsp), $0, $RM_FS, $S_XFER+16, FR4(%rsp), FR5(%rsp)
+.Lwb_perm:
+	R_CONST .Lc_idx_even, .Lwb_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV FR1(%rsp), $RM_CONST, FR5(%rsp)
+	R_VPERMD %r14d, FR1(%rsp), $RM_REG, %r15d
+	cmpl $0, FR2(%rsp)
+	je .Lwb_odd
+	R_MASK $0xff00
+	movl %eax, FR5(%rsp)
+	R_VPERMD %r14d, FR1(%rsp), $RM_REG, FR2(%rsp), FR5(%rsp)
+.Lwb_odd:
+	cmpl $4, XF_A(%r13)
+	je .Lwb_odd2
+	R_CONST_DW $0xffff, .Lwb_notemp				# the sign-extended low byte cut to its word
+	movl %eax, FR5(%rsp)
+	R_I0F $0xdb, %r14d, %r14d, $RM_CONST, FR5(%rsp)
+.Lwb_odd2:
+	R_CONST .Lc_idx_odd, .Lwb_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV FR1(%rsp), $RM_CONST, FR5(%rsp)
+	R_VPERMD FR0(%rsp), FR1(%rsp), $RM_REG, %r15d
+	cmpl $0, FR2(%rsp)
+	je .Lwb_join
+	R_MASK $0xff00
+	movl %eax, FR5(%rsp)
+	R_VPERMD FR0(%rsp), FR1(%rsp), $RM_REG, FR2(%rsp), FR5(%rsp)
+.Lwb_join:
+	R_SHIFT $6, FR0(%rsp), $RM_REG, FR0(%rsp), $16
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lwb_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_packusdw: vpackusdw: per 128-bit block the first source's four
+# dwords then the second's as eight words, each saturated to 0..65535
+# (vpmaxsd 0, vpminsd 65535), the pairs packed into the block's lanes
+# 0 and 2 (the next lane shifted up and or'd), and the two sources'
+# packed lanes gathered by one vpermd each, the second under the mask
+# of the block's upper lanes.
+xl_packusdw:
+	R_ENTER
+	R_SRC2 $0, $0, .Lpd_notemp
+	movl %eax, %r15d			# b
+	R_TEMP .Lpd_notemp
+	movl %eax, %r14d			# ra
+	R_TEMP .Lpd_notemp
+	movl %eax, FR0(%rsp)			# rb
+	R_TEMP .Lpd_notemp
+	movl %eax, FR1(%rsp)			# t
+	R_TEMP .Lpd_notemp
+	movl %eax, FR2(%rsp)			# ix
+	R_CONST_DW $0, .Lpd_notemp
+	movl %eax, FR3(%rsp)
+	R_CONST_DW $0xffff, .Lpd_notemp
+	movl %eax, FR4(%rsp)
+	R_I38 $0x3d, %r14d, FS1(%rsp), $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, %r14d, %r14d, $RM_CONST, FR4(%rsp)
+	R_VPSHUFD FR1(%rsp), $RM_REG, %r14d, $0x39
+	R_SHIFT $6, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR1(%rsp)
+	R_I38 $0x3d, FR0(%rsp), %r15d, $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, FR0(%rsp), FR0(%rsp), $RM_CONST, FR4(%rsp)
+	R_VPSHUFD FR1(%rsp), $RM_REG, FR0(%rsp), $0x39
+	R_SHIFT $6, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_I0F $0xeb, FR0(%rsp), FR0(%rsp), $RM_REG, FR1(%rsp)
+	R_CONST .Lc_idx_pack, .Lpd_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV FR2(%rsp), $RM_CONST, FR5(%rsp)
+	R_VPERMD FR1(%rsp), FR2(%rsp), $RM_REG, %r14d
+	R_MASK $0xcccc
+	movl %eax, FR5(%rsp)
+	R_VPERMD FR1(%rsp), FR2(%rsp), $RM_REG, FR0(%rsp), FR5(%rsp)
+	R_COMMIT FD(%rsp), FR1(%rsp), $0
+	R_OK
+.Lpd_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_packuswb: vpackuswb: per block the first source's eight words then
+# the second's as sixteen bytes, each saturated to 0..255: a source's
+# low words (shifted up and back, arithmetically) and high words
+# (shifted down) clamped (vpmaxsd 0, vpminsd 255), joined as two bytes
+# a dword, the dword pairs packed into the block's lanes 0 and 2, and
+# the sources gathered as in vpackusdw.
+xl_packuswb:
+	R_ENTER
+	R_SRC2 $0, $0, .Lpb_notemp
+	movl %eax, %r15d			# b
+	R_TEMP .Lpb_notemp
+	movl %eax, %r14d			# ra
+	R_TEMP .Lpb_notemp
+	movl %eax, FR0(%rsp)			# rb
+	R_TEMP .Lpb_notemp
+	movl %eax, FR1(%rsp)			# t
+	R_TEMP .Lpb_notemp
+	movl %eax, FR2(%rsp)			# ix (later), u first
+	R_CONST_DW $0, .Lpb_notemp
+	movl %eax, FR3(%rsp)
+	R_CONST_DW $0xff, .Lpb_notemp
+	movl %eax, FR4(%rsp)
+	# a: low words in t, high words in ra
+	R_SHIFT $6, FR1(%rsp), $RM_REG, FS1(%rsp), $16
+	R_SHIFT $4, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_SHIFT $4, %r14d, $RM_REG, FS1(%rsp), $16
+	R_I38 $0x3d, FR1(%rsp), FR1(%rsp), $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, FR1(%rsp), FR1(%rsp), $RM_CONST, FR4(%rsp)
+	R_I38 $0x3d, %r14d, %r14d, $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, %r14d, %r14d, $RM_CONST, FR4(%rsp)
+	R_SHIFT $6, %r14d, $RM_REG, %r14d, $8
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR1(%rsp)
+	R_VPSHUFD FR1(%rsp), $RM_REG, %r14d, $0x39
+	R_SHIFT $6, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, FR1(%rsp)
+	# b the same into rb
+	R_SHIFT $6, FR1(%rsp), $RM_REG, %r15d, $16
+	R_SHIFT $4, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_SHIFT $4, FR0(%rsp), $RM_REG, %r15d, $16
+	R_I38 $0x3d, FR1(%rsp), FR1(%rsp), $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, FR1(%rsp), FR1(%rsp), $RM_CONST, FR4(%rsp)
+	R_I38 $0x3d, FR0(%rsp), FR0(%rsp), $RM_CONST, FR3(%rsp)
+	R_I38 $0x39, FR0(%rsp), FR0(%rsp), $RM_CONST, FR4(%rsp)
+	R_SHIFT $6, FR0(%rsp), $RM_REG, FR0(%rsp), $8
+	R_I0F $0xeb, FR0(%rsp), FR0(%rsp), $RM_REG, FR1(%rsp)
+	R_VPSHUFD FR1(%rsp), $RM_REG, FR0(%rsp), $0x39
+	R_SHIFT $6, FR1(%rsp), $RM_REG, FR1(%rsp), $16
+	R_I0F $0xeb, FR0(%rsp), FR0(%rsp), $RM_REG, FR1(%rsp)
+	R_CONST .Lc_idx_pack, .Lpb_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV FR2(%rsp), $RM_CONST, FR5(%rsp)
+	R_VPERMD FR1(%rsp), FR2(%rsp), $RM_REG, %r14d
+	R_MASK $0xcccc
+	movl %eax, FR5(%rsp)
+	R_VPERMD FR1(%rsp), FR2(%rsp), $RM_REG, FR0(%rsp), FR5(%rsp)
+	R_COMMIT FD(%rsp), FR1(%rsp), $0
+	R_OK
+.Lpb_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_cvtps2pd: vcvtps2pd zmm{k}, ymm/m256 (and the ymm, xmm/m128 and
+# xmm, xmm/m64 forms): the card's vcvtps2pd converts the low half of
+# the lanes; a memory source is loaded under those lanes.
+xl_cvtps2pd:
+	R_ENTER
+	movl FRM(%rsp), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lp2d_src
+	R_TEMP .Lp2d_notemp
+	movl %eax, %r15d
+	R_LANES $1
+	R_MASK %eax
+	movl %eax, FR0(%rsp)
+	R_UNAL %r15d, FR0(%rsp), $0, $0, $0, $0
+.Lp2d_src:
+	movl FD(%rsp), %r14d
+	cmpl $0, FAAA(%rsp)
+	jne .Lp2d_temp
+	cmpl $2, FLL(%rsp)
+	je .Lp2d_cvt
+.Lp2d_temp:
+	R_TEMP .Lp2d_notemp
+	movl %eax, %r14d
+.Lp2d_cvt:
+	R_MVEX $1, $0, $0, $0x5a, %r14d, $0, $RM_REG, %r15d
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lp2d_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_sminmax: vminss (XF_A 0), vmaxss (1), the sd forms by XB_QWORD:
+# the second source (broadcast from memory), then the first where it
+# wins an ordered compare, into lane 0; lanes 1 to 3 from the first
+# source; the lanes above zero. A write mask is not taken.
+xl_sminmax:
+	R_ENTER
+	cmpl $0, FAAA(%rsp)
+	jne .Lsmm_shape
+	movl XF_B(%r13), %eax
+	andl $XB_QWORD, %eax
+	movl %eax, FR1(%rsp)			# w
+	movl FRM(%rsp), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lsmm_src
+	R_TEMP .Lsmm_notemp
+	movl %eax, %r15d
+	R_BCASTM %r15d, $0, FR1(%rsp)
+.Lsmm_src:
+	R_TEMP .Lsmm_notemp
+	movl %eax, %r14d			# r
+	R_EM em_k
+	movl %eax, FR0(%rsp)
+	R_VMOV %r14d, $RM_REG, %r15d, $0, FR1(%rsp)
+	cmpl $0, XF_A(%r13)
+	je .Lsmm_min
+	R_VCMP FR0(%rsp), %r15d, $RM_REG, FS1(%rsp), $1, $0, FR1(%rsp)
+	jmp .Lsmm_merge
+.Lsmm_min:
+	R_VCMP FR0(%rsp), FS1(%rsp), $RM_REG, %r15d, $1, $0, FR1(%rsp)
+.Lsmm_merge:
+	R_VMOV %r14d, $RM_REG, FS1(%rsp), FR0(%rsp), FR1(%rsp)
+	R_MASK $1
+	movl %eax, FR2(%rsp)
+	R_VMOV FD(%rsp), $RM_REG, %r14d, FR2(%rsp), FR1(%rsp)
+	movl FD(%rsp), %eax
+	cmpl FS1(%rsp), %eax
+	je .Lsmm_upper
+	movl $0xe, %eax
+	cmpl $0, FR1(%rsp)
+	je .Lsmm_rest
+	movl $2, %eax
+.Lsmm_rest:
+	R_MASK %eax
+	movl %eax, FR2(%rsp)
+	R_VMOV FD(%rsp), $RM_REG, FS1(%rsp), FR2(%rsp), FR1(%rsp)
+.Lsmm_upper:
+	R_ZERO_LANES FD(%rsp), $0xfff0
+	R_OK
+.Lsmm_shape:
+	leaq s_shape(%rip), %rax
+	R_LEAVE
+.Lsmm_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+	.section .rodata
+.Lbw_tab:	.long 0, 0xffff, 0xffff0000, 0xffffffff
+	.balign 64
+.Lc_idx_even:	.long 0, 2, 4, 6, 8, 10, 12, 14, 0, 2, 4, 6, 8, 10, 12, 14
+.Lc_idx_odd:	.long 1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15
+.Lc_idx_pack:	.long 0, 2, 0, 2, 4, 6, 4, 6, 8, 10, 8, 10, 12, 14, 12, 14
+	.text
+
+# ---- batch 2c: the byte narrowing, gathers and scatters, the half-float conversions, scalef, valignq, rounding ----
+
+# xl_narrow_db: vpmovdb: every dword's low byte, packed in lane order:
+# the dwords masked to a byte, each block's four packed into its first
+# dword (the block rotated by one lane and shifted by 8, or'd; by two
+# lanes and 16, or'd), the four first dwords gathered by vpermd into
+# lanes 0 to 3: to an xmm with the lanes above zeroed, or to memory
+# through the scratch slot and scalar stores (any alignment). A write
+# mask would be a byte mask: refused. (rewrite.rs narrow_db.)
+xl_narrow_db:
+	R_ENTER
+	cmpl $0, FAAA(%rsp)
+	jne .Lnb_qmask
+	R_TEMP .Lnb_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lnb_notemp
+	movl %eax, %r15d			# t
+	R_CONST_DW $0xff, .Lnb_notemp
+	movl %eax, FR0(%rsp)
+	R_I0F $0xdb, %r14d, FD(%rsp), $RM_CONST, FR0(%rsp)
+	R_VPSHUFD %r15d, $RM_REG, %r14d, $0x39		# lane i from lane i + 1
+	R_SHIFT $6, %r15d, $RM_REG, %r15d, $8
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, %r15d
+	R_VPSHUFD %r15d, $RM_REG, %r14d, $0x4e		# lane i from lane i + 2
+	R_SHIFT $6, %r15d, $RM_REG, %r15d, $16
+	R_I0F $0xeb, %r14d, %r14d, $RM_REG, %r15d
+	R_CONST .Lc_idx_db, .Lnb_notemp
+	movl %eax, FR0(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR0(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, %r14d
+	R_LANES $0
+	popcntl %eax, %eax
+	shrl $2, %eax
+	movl %eax, FR1(%rsp)			# the dwords of bytes: 4, 2 or 1
+	movl %eax, %ecx
+	movl $1, %eax
+	shll %cl, %eax
+	decl %eax
+	movl %eax, FR2(%rsp)			# their span
+	R_MASK FR2(%rsp)
+	movl %eax, FR3(%rsp)
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lnb_reg
+	R_MVEX $2, $1, $0, $0xd0, %r14d, $0, $RM_FS, $S_XFER, FR3(%rsp)
+	R_EM em_rax
+	R_EM em_rcx
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	call em_addr_regs
+	movq %rbx, %rdi
+	movl $1, %esi
+	movq %r12, %rdx
+	call em_lea				# lea rcx, [m]
+	movl $0, FR4(%rsp)			# done
+	movl FR1(%rsp), %eax
+	shll $2, %eax
+	movl %eax, FR5(%rsp)			# the bytes
+.Lnb_store:
+	movl FR5(%rsp), %eax
+	subl FR4(%rsp), %eax
+	cmpl $8, %eax
+	setae %cl
+	movzbl %cl, %ecx
+	movl %ecx, FR2(%rsp)			# wide: 8 bytes
+	movl $S_XFER, %eax
+	addl FR4(%rsp), %eax
+	movl %eax, FR0(%rsp)
+	R_GPRS $0, FR2(%rsp), FR0(%rsp), $0	# rax or eax from the slot
+	cmpl $0, FR2(%rsp)
+	je .Lnb_mov
+	R_BYTE $0x48
+.Lnb_mov:
+	R_BYTE $0x89				# mov [rcx + done], rax or eax
+	R_BYTE $0x41
+	R_BYTE FR4(%rsp)
+	movl FR4(%rsp), %eax
+	addl $4, %eax
+	cmpl $0, FR2(%rsp)
+	je .Lnb_next
+	addl $4, %eax
+.Lnb_next:
+	movl %eax, FR4(%rsp)
+	cmpl FR5(%rsp), %eax
+	jb .Lnb_store
+	R_OK
+.Lnb_reg:
+	R_VMOV FRM(%rsp), $RM_REG, %r14d, FR3(%rsp)
+	movl FR2(%rsp), %eax
+	notl %eax
+	andl $0xffff, %eax
+	R_ZERO_LANES FRM(%rsp), %eax
+	R_OK
+.Lnb_qmask:
+	leaq s_qmask(%rip), %rax
+	R_LEAVE
+.Lnb_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_gather: vpgatherdd, vgatherdps, vpgatherdq, vgatherdpd and the
+# scatters: the card has each with the same bytes after the prefix
+# rewrite (P1 bit 2 cleared; P2 keeps V' and the mask), but completes a
+# subset of the mask's elements per issue, clearing their bits
+# (327364-001, VPSCATTERDD), so the instruction is repeated while the
+# mask is not zero with jknzd (VEX.NDS.128.0F.W0 85 rel32, the mask in
+# vvvv), which reads no flag and no general register. The 512-bit form
+# with a mask only. (rewrite.rs gather_scatter.)
+xl_gather:
+	R_ENTER
+	cmpl $0, FAAA(%rsp)
+	je .Lga_mask
+	cmpl $2, FLL(%rsp)
+	jne .Lga_shape
+	cmpq $0, IN_SRC(%r12)
+	je .Lga_shape
+	movq IN_SRC(%r12), %rsi
+	movzbl IN_LEN(%r12), %r14d
+	xorl %ecx, %ecx
+.Lga_copy:
+	movzbl (%rsi,%rcx), %eax
+	movb %al, FBUF(%rsp,%rcx)
+	incl %ecx
+	cmpl %r14d, %ecx
+	jb .Lga_copy
+	andb $~0x04, FBUF + 2(%rsp)
+	andb $0x0f, FBUF + 3(%rsp)
+	movq EM_OUT(%rbx), %r15			# the instruction's start
+	movq %rbx, %rdi
+	leaq FBUF(%rsp), %rsi
+	movl %r14d, %edx
+	call em_bytes
+	movl FAAA(%rsp), %eax
+	notl %eax
+	andl $0xf, %eax
+	shll $3, %eax
+	orl $0x80, %eax
+	movl %eax, FR0(%rsp)
+	R_BYTE $0xc5
+	R_BYTE FR0(%rsp)
+	R_BYTE $0x85
+	movq EM_OUT(%rbx), %rax
+	addq $4, %rax
+	subq %rax, %r15				# rel32 = start - (the end of the jump)
+	movq %rbx, %rdi
+	movl %r15d, %eax
+	call em_dword
+	R_OK
+.Lga_mask:
+	leaq s2_gather_mask(%rip), %rax
+	R_LEAVE
+.Lga_shape:
+	leaq s_shape(%rip), %rax
+	R_LEAVE
+
+# xl_cvt_ph2ps: vcvtph2ps: the card's float16 up-conversion, from
+# memory through the unpack pair (any alignment) or from a register
+# through the scratch slot (the halves as 8, 4 or 2 dwords).
+xl_cvt_ph2ps:
+	R_ENTER
+	movl FD(%rsp), %r14d
+	cmpl $0, FAAA(%rsp)
+	jne .Lph_temp
+	cmpl $2, FLL(%rsp)
+	je .Lph_r
+.Lph_temp:
+	R_TEMP .Lph_notemp
+	movl %eax, %r14d
+.Lph_r:
+	R_LANES $0
+	movl %eax, FR0(%rsp)
+	movl $0, FR1(%rsp)
+	cmpl $2, FLL(%rsp)
+	je .Lph_k
+	R_MASK FR0(%rsp)
+	movl %eax, FR1(%rsp)
+.Lph_k:
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lph_reg
+	R_UNAL %r14d, FR1(%rsp), $0, $0, $1, $3
+	jmp .Lph_commit
+.Lph_reg:
+	movl $0xff, %eax
+	cmpl $2, FLL(%rsp)
+	je .Lph_halves
+	movl $0xf, %eax
+	cmpl $1, FLL(%rsp)
+	je .Lph_halves
+	movl $3, %eax
+.Lph_halves:
+	R_MASK %eax
+	movl %eax, FR2(%rsp)
+	R_MVEX $2, $1, $0, $0xd0, FRM(%rsp), $0, $RM_FS, $S_XFER, FR2(%rsp)
+	R_MVEX $1, $0, $0, $0x28, %r14d, $0, $RM_FS, $S_XFER, FR1(%rsp), $3
+.Lph_commit:
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lph_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_cvt_ps2ph: vcvtps2ph: the card's float16 store down-conversion
+# (MXCSR rounding, which the immediate's 0 and 4 both mean here): to
+# memory by the pack pair (a masked store refused: the pack store
+# compresses through its mask), to a register through the scratch
+# slot, the halves back as 8, 4 or 2 dwords, the lanes above zero.
+xl_cvt_ps2ph:
+	R_ENTER
+	movzbl IN_IMM(%r12), %eax
+	testl $3, %eax
+	jz .Lps_round
+	testl $4, %eax
+	jz .Lps_rounding
+.Lps_round:
+	R_LANES $0
+	movl %eax, FR0(%rsp)
+	movl $0, FR1(%rsp)
+	cmpl $2, FLL(%rsp)
+	je .Lps_k
+	R_MASK FR0(%rsp)
+	movl %eax, FR1(%rsp)
+.Lps_k:
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lps_reg
+	cmpl $0, FAAA(%rsp)
+	jne .Lps_masked
+	R_UNAL FD(%rsp), FR1(%rsp), $0, $1, $1, $3
+	R_OK
+.Lps_reg:
+	R_MVEX $1, $0, $0, $0x29, FD(%rsp), $0, $RM_FS, $S_XFER, FR1(%rsp), $3
+	movl FRM(%rsp), %r14d
+	cmpl $0, FAAA(%rsp)
+	je .Lps_lanes
+	R_TEMP .Lps_notemp
+	movl %eax, %r14d
+.Lps_lanes:
+	movl $0xff, %eax
+	cmpl $2, FLL(%rsp)
+	je .Lps_back
+	movl $0xf, %eax
+	cmpl $1, FLL(%rsp)
+	je .Lps_back
+	movl $3, %eax
+.Lps_back:
+	movl %eax, FR2(%rsp)			# the result's lanes
+	R_MASK %eax
+	movl %eax, FR3(%rsp)
+	R_VMOV %r14d, $RM_FS, $S_XFER, FR3(%rsp)
+	movl FR2(%rsp), %eax
+	notl %eax
+	andl $0xffff, %eax
+	movl %eax, FR4(%rsp)
+	R_ZERO_LANES %r14d, FR4(%rsp)
+	cmpl $0, FAAA(%rsp)
+	je .Lps_ok
+	R_MASK FR2(%rsp)
+	movl %eax, FR3(%rsp)
+	R_K2 em_kand, FR3(%rsp), FAAA(%rsp)
+	R_VMOV FRM(%rsp), $RM_REG, %r14d, FR3(%rsp)
+	cmpb $0, IN_Z(%r12)
+	je .Lps_upper
+	R_K2 em_knot, FR3(%rsp), FR3(%rsp)
+	R_ZERO FRM(%rsp), FR3(%rsp)
+	R_OK
+.Lps_upper:
+	R_ZERO_LANES FRM(%rsp), FR4(%rsp)
+.Lps_ok:
+	R_OK
+.Lps_rounding:
+	leaq s2_ph_rounding(%rip), %rax
+	R_LEAVE
+.Lps_masked:
+	leaq s2_ph_masked(%rip), %rax
+	R_LEAVE
+.Lps_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_scalef: vscalefps: x times 2 to the floor of y: the card's vscaleps
+# (MVEX.NDS.512.66.0F38.W0 84) takes the exponent as an int32 vector:
+# floor(y) as an integer first (vcvtfxpntps2dq rounding down).
+xl_scalef:
+	R_ENTER
+	R_SRC2 $0, $XB_FLOAT, .Lsc_notemp
+	movl %eax, %r15d			# s2
+	R_TEMP .Lsc_notemp
+	movl %eax, %r14d			# t
+	R_TEMP .Lsc_notemp
+	movl %eax, FR0(%rsp)			# r
+	R_MVEX $3, $1, $0, $0xcb, %r14d, $0, $RM_REG, %r15d, $0, $0, $1
+	R_MVEX $2, $1, $0, $0x84, FR0(%rsp), FS1(%rsp), $RM_REG, %r14d
+	R_COMMIT FD(%rsp), FR0(%rsp), $0
+	R_OK
+.Lsc_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_valignq: valignq: the card's valignd by twice the count; a
+# narrower form first joins the two sources' low halves at the vector
+# length, then aligns within it.
+xl_valignq:
+	R_ENTER
+	R_SRC2 $1, $0, .Lvq_notemp
+	movl %eax, %r15d			# s2
+	R_TEMP .Lvq_notemp
+	movl %eax, %r14d			# r
+	movzbl IN_IMM(%r12), %eax
+	andl $7, %eax
+	addl %eax, %eax
+	movl %eax, FR0(%rsp)			# the count in dwords
+	cmpl $2, FLL(%rsp)
+	jne .Lvq_narrow
+	R_VALIGND %r14d, FS1(%rsp), $RM_REG, %r15d, FR0(%rsp)
+	jmp .Lvq_commit
+.Lvq_narrow:
+	R_TEMP .Lvq_notemp
+	movl %eax, FR1(%rsp)			# t = [s2 low half | s1 low half]
+	R_VMOV FR1(%rsp), $RM_REG, %r15d
+	movl $0x4e, %eax
+	movl $0xff00, %ecx
+	cmpl $1, FLL(%rsp)
+	je .Lvq_join
+	movl $0, %eax
+	movl $0xf0, %ecx
+.Lvq_join:
+	movl %eax, FR2(%rsp)
+	R_MASK %ecx
+	movl %eax, FR3(%rsp)
+	R_VPERMF FR1(%rsp), $RM_REG, FS1(%rsp), FR2(%rsp), FR3(%rsp)
+	R_VALIGND %r14d, FR1(%rsp), $RM_REG, FR1(%rsp), FR0(%rsp)
+.Lvq_commit:
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lvq_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_rndscale: vrndscaleps (XF_A 0), vrndscalepd (1), vrndscaless (2),
+# vrndscalesd (3) with M = 0 (to an integer) and an explicit rounding
+# mode: the card's vrndfxpntps/pd (MVEX.512.66.0F3A 52 ib; W1 for pd),
+# whose immediate takes the same two rounding-mode bits. A scalar form
+# works lane 0 (a memory element as a broadcast), keeps lanes 1 to 3
+# from the first source and zeroes above; its masked form is refused.
+xl_rndscale:
+	R_ENTER
+	movzbl IN_IMM(%r12), %eax
+	testl $0xf0, %eax
+	jnz .Lrs_frac
+	testl $4, %eax
+	jnz .Lrs_mxcsr
+	andl $3, %eax
+	movl %eax, FR0(%rsp)			# the rounding mode
+	movl XF_A(%r13), %eax
+	andl $1, %eax
+	movl %eax, FR1(%rsp)			# w
+	testl $2, XF_A(%r13)
+	jz .Lrs_packed
+	cmpl $0, FAAA(%rsp)
+	jne .Lrs_masked
+	R_MASK $1
+	movl %eax, FR2(%rsp)
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lrs_sreg
+	R_MVEXM $3, $1, FR1(%rsp), $0x52, FD(%rsp), $0, FR2(%rsp), $1, FR0(%rsp)
+	jmp .Lrs_merge
+.Lrs_sreg:
+	R_MVEX $3, $1, FR1(%rsp), $0x52, FD(%rsp), $0, $RM_REG, FRM(%rsp), FR2(%rsp), $0, FR0(%rsp)
+.Lrs_merge:
+	movl FD(%rsp), %eax
+	cmpl FS1(%rsp), %eax
+	je .Lrs_upper
+	movl $0xe, %eax
+	cmpl $0, FR1(%rsp)
+	je .Lrs_rest
+	movl $2, %eax
+.Lrs_rest:
+	R_MASK %eax
+	movl %eax, FR2(%rsp)
+	R_VMOV FD(%rsp), $RM_REG, FS1(%rsp), FR2(%rsp), FR1(%rsp)
+.Lrs_upper:
+	R_ZERO_LANES FD(%rsp), $0xfff0
+	R_OK
+.Lrs_packed:
+	R_SRC2 $0, $XB_FLOAT, .Lrs_notemp
+	movl %eax, %r15d
+	movl FD(%rsp), %r14d
+	cmpl $0, FAAA(%rsp)
+	jne .Lrs_temp
+	cmpl $2, FLL(%rsp)
+	je .Lrs_round
+.Lrs_temp:
+	R_TEMP .Lrs_notemp
+	movl %eax, %r14d
+.Lrs_round:
+	R_MVEX $3, $1, FR1(%rsp), $0x52, %r14d, $0, $RM_REG, %r15d, $0, $0, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, FR1(%rsp)
+	R_OK
+.Lrs_frac:
+	leaq s2_rnd_frac(%rip), %rax
+	R_LEAVE
+.Lrs_mxcsr:
+	leaq s2_rnd_mxcsr(%rip), %rax
+	R_LEAVE
+.Lrs_masked:
+	leaq s2_masked_scalar(%rip), %rax
+	R_LEAVE
+.Lrs_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+	.section .rodata
+s2_gather_mask:	.asciz "a gather or scatter without a mask"
+s2_ph_rounding:	.asciz "vcvtps2ph with a rounding other than nearest: not expressed yet"
+s2_ph_masked:	.asciz "a masked float16 store: the pack store compresses through the mask"
+s2_rnd_frac:	.asciz "vrndscale to a fraction of a bit (M above 0): not expressed yet"
+s2_rnd_mxcsr:	.asciz "vrndscale with the MXCSR rounding mode: not expressed yet"
+s2_masked_scalar: .asciz "a masked scalar form: not expressed yet"
+	.balign 64
+.Lc_idx_db:	.long 0, 4, 8, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	.text
+
+# ---- batch 2c (continued): the permutes, the scalar conversions ----
+
+	.macro R_X87 op, reg, off
+	movq %rbx, %rdi
+	movl \op, %esi
+	movl \reg, %edx
+	movl \off, %ecx
+	call x87_fs
+	.endm
+
+# xl_permute: the permutes the card composes from vpermd (indices, bits
+# 3:0) and vptestmd. XF_A: 0 vpermi2d/ps and 1 vpermt2d/ps (two tables
+# of dwords: the index in reg, or in vvvv), 2 vpermi2q/pd and 3
+# vpermt2q/pd (a qword index vector as a dword one: lane 2i gets 2q,
+# lane 2i + 1 gets 2q + 1, bit 4 keeps the table selector), 4 vpermq
+# and vpermpd (by immediate: per 256-bit half, qword j from qword
+# (imm >> 2j) and 3 of the same half; by vector: 3-bit qword indices),
+# 5 vpermilpd (by immediate: bit 2b + j picks the qword of block b's
+# lane j; by vector: bit 1 of each qword index), 6 vpermilps by vector
+# (two bits of each dword index within its block), 7 the narrow vpermd
+# and vpermps (3-bit indices for ymm, 2-bit for xmm). (rewrite.rs
+# permute.)
+xl_permute:
+	R_ENTER
+	R_TEMP .Lpm_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lpm_notemp
+	movl %eax, %r15d			# t
+	movl XF_A(%r13), %eax
+	cmpl $4, %eax
+	jb .Lpm_two
+	je .Lpm_q
+	cmpl $5, %eax
+	je .Lpm_ilpd
+	cmpl $6, %eax
+	je .Lpm_ilps
+	# 7: the narrow vpermd: the index uses 3 bits (ymm) or 2 (xmm)
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	movl $7, %eax
+	cmpl $1, FLL(%rsp)
+	je .Lpm_nmask
+	movl $3, %eax
+.Lpm_nmask:
+	R_CONST_DW %eax, .Lpm_notemp
+	movl %eax, FR1(%rsp)
+	R_I0F $0xdb, %r15d, FS1(%rsp), $RM_CONST, FR1(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lpm_two:
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)			# s2
+	movl FD(%rsp), %eax			# vpermi2: the index in reg, the first table in vvvv
+	movl FS1(%rsp), %ecx
+	testl $1, XF_A(%r13)
+	jz .Lpm_roles
+	xchgl %eax, %ecx			# vpermt2: the first table in reg, the index in vvvv
+.Lpm_roles:
+	movl %eax, FR1(%rsp)			# the index
+	movl %ecx, FR2(%rsp)			# the first table
+	cmpl $2, XF_A(%r13)
+	jb .Lpm_sel
+	# a qword index vector as a dword one
+	R_VPSHUFD %r15d, $RM_REG, FR1(%rsp), $0xa0
+	R_SHIFT $6, %r15d, $RM_REG, %r15d, $1
+	R_CONST .Lc_odd01, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xfe, %r15d, %r15d, $RM_CONST, FR3(%rsp)
+	movl %r15d, FR1(%rsp)
+.Lpm_sel:
+	R_CONST_DW $0x10, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_EM em_k
+	movl %eax, FR4(%rsp)
+	R_VPTESTMD FR4(%rsp), FR1(%rsp), $RM_CONST, FR3(%rsp)	# the lanes that read the second table
+	R_VPERMD %r14d, FR1(%rsp), $RM_REG, FR2(%rsp)
+	R_VPERMD %r14d, FR1(%rsp), $RM_REG, FR0(%rsp), FR4(%rsp)
+	movl $0, %eax
+	cmpl $2, XF_A(%r13)
+	jb .Lpm_commit2
+	movl $1, %eax
+.Lpm_commit2:
+	movl %eax, FR5(%rsp)
+	R_COMMIT FD(%rsp), %r14d, FR5(%rsp)
+	R_OK
+.Lpm_q:
+	testb $H_IMM, IN_HAS(%r12)
+	jz .Lpm_qvec
+	# per 256-bit half: qword j from qword (imm >> 2j) & 3 of the same half
+	movzbl IN_IMM(%r12), %edx
+	xorl %ecx, %ecx				# i, the dword lane
+.Lpm_qc:
+	movl %ecx, %eax
+	shrl $3, %eax
+	shll $3, %eax				# half * 8
+	movl %ecx, %esi
+	shrl $1, %esi
+	andl $3, %esi				# q
+	addl %esi, %esi				# 2q
+	pushq %rcx
+	movl %esi, %ecx
+	movl %edx, %esi
+	shrl %cl, %esi
+	popq %rcx
+	andl $3, %esi				# the source qword
+	addl %esi, %esi
+	addl %esi, %eax
+	movl %ecx, %esi
+	andl $1, %esi
+	addl %esi, %eax
+	movl %eax, FBUF(%rsp,%rcx,4)
+	incl %ecx
+	cmpl $16, %ecx
+	jb .Lpm_qc
+	R_CONST_BUF .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR3(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lpm_qvec:
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	R_VPSHUFD %r15d, $RM_REG, FS1(%rsp), $0xa0
+	R_SHIFT $6, %r15d, $RM_REG, %r15d, $1
+	R_CONST .Lc_odd01, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xfe, %r15d, %r15d, $RM_CONST, FR3(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lpm_ilpd:
+	testb $H_IMM, IN_HAS(%r12)
+	jz .Lpm_ilpdvec
+	# bit (2b + j) of the immediate picks the qword for lane j of block b
+	movzbl IN_IMM(%r12), %edx
+	xorl %ecx, %ecx
+.Lpm_pc:
+	movl %ecx, %eax
+	shrl $2, %eax				# b
+	movl %eax, %esi
+	addl %esi, %esi				# 2b
+	movl %ecx, %edi
+	shrl $1, %edi
+	andl $1, %edi				# j
+	addl %edi, %esi				# 2b + j
+	pushq %rcx
+	movl %esi, %ecx
+	movl %edx, %esi
+	shrl %cl, %esi
+	popq %rcx
+	andl $1, %esi				# sel
+	shll $2, %eax				# b * 4
+	addl %esi, %esi
+	addl %esi, %eax
+	movl %ecx, %esi
+	andl $1, %esi
+	addl %esi, %eax
+	movl %eax, FBUF(%rsp,%rcx,4)
+	incl %ecx
+	cmpl $16, %ecx
+	jb .Lpm_pc
+	R_CONST_BUF .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR3(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FR0(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lpm_ilpdvec:
+	# bit 1 of each qword index picks the qword within its 128-bit block
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	R_VPSHUFD %r15d, $RM_REG, FR0(%rsp), $0xa0
+	R_SHIFT $2, %r15d, $RM_REG, %r15d, $1
+	R_CONST_DW $1, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xdb, %r15d, %r15d, $RM_CONST, FR3(%rsp)
+	R_SHIFT $6, %r15d, $RM_REG, %r15d, $1
+	R_CONST .Lc_base_pd, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xfe, %r15d, %r15d, $RM_CONST, FR3(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FS1(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $1
+	R_OK
+.Lpm_ilps:
+	# two bits of each dword index pick the dword within its block
+	R_SRC2 $0, $0, .Lpm_notemp
+	movl %eax, FR0(%rsp)
+	R_CONST_DW $3, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xdb, %r15d, FR0(%rsp), $RM_CONST, FR3(%rsp)
+	R_CONST .Lc_base_ps, .Lpm_notemp
+	movl %eax, FR3(%rsp)
+	R_I0F $0xfe, %r15d, %r15d, $RM_CONST, FR3(%rsp)
+	R_VPERMD %r14d, %r15d, $RM_REG, FS1(%rsp)
+	R_COMMIT FD(%rsp), %r14d, $0
+	R_OK
+.Lpm_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_permilps2: vpermilps by immediate (xl_permilps) or by vector
+# (xl_permute, 6).
+xl_permilps2:
+	movq EM_IN(%rdi), %rax
+	testb $H_IMM, IN_HAS(%rax)
+	jz 1f
+	jmp xl_permilps
+1:	leaq xf2_permilps_var(%rip), %rsi
+	jmp xl_permute
+# xl_permd2: vpermd and vpermps: the card's vpermd at 512 bits
+# (xl_nds), the narrow forms through xl_permute (7).
+xl_permd2:
+	movq EM_IN(%rdi), %rax
+	EV_LL %ecx, %rax
+	cmpl $2, %ecx
+	jne 1f
+	leaq xf2_vpermd_nds(%rip), %rsi
+	jmp xl_nds
+1:	leaq xf2_permd_narrow(%rip), %rsi
+	jmp xl_permute
+
+# xl_cvti2s: vcvtsi2ss (XF_A 0), vcvtsi2sd (1), vcvtusi2ss (2),
+# vcvtusi2sd (3) from a general register or memory, 32 or 64 bits: the
+# integer to the scratch slot as a qword (sign- or zero-extended),
+# fild, for an unsigned 64-bit value 2^64 added when its top bit is set
+# (chosen without a branch: the sign spread over rax masks the double),
+# fstp at the width (the one rounding), then the lane in. (rewrite.rs
+# scalar_cvt.)
+xl_cvti2s:
+	R_ENTER
+	cmpb $0, IN_B(%r12)
+	je .Lci_b
+	cmpb $3, IN_MOD(%r12)
+	je .Lci_rounding
+.Lci_b:
+	movl XF_A(%r13), %r14d
+	movzbl IN_W(%r12), %r15d		# wide
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lci_reg
+	R_EM em_rax
+	R_EM em_rcx
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	call em_addr_regs
+	movq %rbx, %rdi
+	movl $1, %esi
+	movq %r12, %rdx
+	call em_lea				# lea rcx, [m]
+	testl %r15d, %r15d
+	jz .Lci_m32
+	R_BYTES .Lb_mov_rax_rcx, $3		# mov rax, [rcx]
+	jmp .Lci_slot
+.Lci_m32:
+	testl $2, %r14d
+	jz .Lci_msx
+	R_BYTES .Lb_mov_eax_rcxm, $2		# mov eax, [rcx]: zero-extended
+	jmp .Lci_slot
+.Lci_msx:
+	R_BYTES .Lb_movsxd_rax_rcx, $3		# movsxd rax, [rcx]
+	jmp .Lci_slot
+.Lci_reg:
+	testl %r15d, %r15d
+	jz .Lci_r32
+	R_GPRS FRM(%rsp), $1, $S_XFER, $1	# the qword straight to the slot
+	jmp .Lci_fild
+.Lci_r32:
+	R_EM em_rax
+	testl $2, %r14d
+	jz .Lci_rsx
+	cmpl $0, FRM(%rsp)
+	je .Lci_slot				# eax itself: already zero-extended in rax? no: mov eax, eax
+	cmpl $8, FRM(%rsp)
+	jb .Lci_rzx
+	R_BYTE $0x41
+.Lci_rzx:
+	R_BYTE $0x8b				# mov eax, r32
+	movl FRM(%rsp), %eax
+	andl $7, %eax
+	orl $0xc0, %eax
+	R_BYTE %eax
+	jmp .Lci_slot
+.Lci_rsx:
+	movl FRM(%rsp), %eax
+	shrl $3, %eax
+	andl $1, %eax
+	orl $0x48, %eax
+	R_BYTE %eax
+	R_BYTE $0x63				# movsxd rax, r32
+	movl FRM(%rsp), %eax
+	andl $7, %eax
+	orl $0xc0, %eax
+	R_BYTE %eax
+.Lci_slot:
+	R_GPRS $0, $1, $S_XFER, $1
+.Lci_fild:
+	R_X87 $0xdf, $5, $S_XFER		# fild qword
+	testl $2, %r14d
+	jz .Lci_store
+	testl %r15d, %r15d
+	jz .Lci_store
+	R_EM em_flags
+	R_GPRS $0, $1, $S_XFER, $0		# mov rax, [slot]
+	R_BYTES .Lb_sar_rax_63, $4
+	R_EM em_rcx
+	R_BYTES .Lb_mov_rcx_2p64, $10		# mov rcx, 2^64 as a double
+	R_BYTES .Lb_and_rax_rcx, $3
+	R_GPRS $0, $1, $S_XFER+8, $1
+	R_X87 $0xdc, $0, $S_XFER+8		# fadd qword
+.Lci_store:
+	movl $0xd9, %eax			# fstp dword
+	testl $1, %r14d
+	jz .Lci_fstp
+	movl $0xdd, %eax			# fstp qword
+.Lci_fstp:
+	movl %eax, FR0(%rsp)
+	R_X87 FR0(%rsp), $3, $S_XFER
+	movl %r14d, %ecx
+	andl $1, %ecx
+	movq %rbx, %rdi
+	movl FD(%rsp), %esi
+	movl FS1(%rsp), %edx
+	call scalar_in
+	R_OK
+.Lci_rounding:
+	leaq s2_rounding(%rip), %rax
+	R_LEAVE
+
+# xl_cvts2i: vcvtss2si (XF_A 0), vcvttss2si (1), vcvtsd2si (2),
+# vcvttsd2si (3) and the usi forms (4 to 7): to a 32-bit signed result
+# the card's fixed-point conversion with NaN and overflow made the
+# integer indefinite; to a 64-bit or unsigned result the x87 unit
+# (exact, the integer indefinite for NaN and overflow), the rounding
+# control set to truncation around the fistp when the form truncates.
+# The float from a register, or broadcast from memory. (rewrite.rs
+# scalar_cvt.)
+xl_cvts2i:
+	R_ENTER
+	movl XF_A(%r13), %r14d
+	movl %r14d, %eax
+	shrl $1, %eax
+	andl $1, %eax
+	movl %eax, FR0(%rsp)			# from a double
+	movl FRM(%rsp), %r15d
+	testb $H_MEM, IN_HAS(%r12)
+	jz .Lcs_src
+	R_TEMP .Lcs_notemp
+	movl %eax, %r15d
+	R_BCASTM %r15d, $0, FR0(%rsp)
+.Lcs_src:
+	cmpb $0, IN_W(%r12)
+	jne .Lcs_x87
+	testl $4, %r14d
+	jnz .Lcs_x87
+	R_TEMP .Lcs_notemp
+	movl %eax, FR1(%rsp)			# t
+	movl %r14d, %eax
+	andl $1, %eax
+	imull $3, %eax
+	movl %eax, FR2(%rsp)			# the rounding: truncation (3) or MXCSR's (0)
+	cmpl $0, FR0(%rsp)
+	jne .Lcs_pd
+	R_MVEX $3, $1, $0, $0xcb, FR1(%rsp), $0, $RM_REG, %r15d, $0, $0, FR2(%rsp)
+	R_CONST_DW $0x4f000000, .Lcs_notemp
+	movl %eax, FR3(%rsp)
+	R_EM em_k
+	movl %eax, FR4(%rsp)
+	R_VCMP FR4(%rsp), %r15d, $RM_CONST, FR3(%rsp), $5
+	jmp .Lcs_ind
+.Lcs_pd:
+	R_MVEX $3, $3, $1, $0xe6, FR1(%rsp), $0, $RM_REG, %r15d, $0, $0, FR2(%rsp)
+	R_CONST .Lc_2p31_d, .Lcs_notemp
+	movl %eax, FR3(%rsp)
+	R_EM em_k
+	movl %eax, FR4(%rsp)
+	R_VCMP FR4(%rsp), %r15d, $RM_CONST, FR3(%rsp), $5, $0, $1
+.Lcs_ind:
+	R_CONST_DW $0x80000000, .Lcs_notemp
+	movl %eax, FR3(%rsp)
+	R_VMOV FR1(%rsp), $RM_CONST, FR3(%rsp), FR4(%rsp)
+	R_MASK $1
+	movl %eax, FR3(%rsp)
+	R_MVEX $2, $1, $0, $0xd0, FR1(%rsp), $0, $RM_FS, $S_XFER, FR3(%rsp)
+	R_GPRR FD(%rsp), $0, $S_XFER
+	R_OK
+.Lcs_x87:
+	R_TEMP .Lcs_notemp
+	movl %eax, FR1(%rsp)
+	R_VMOV FR1(%rsp), $RM_REG, %r15d, $0, FR0(%rsp)
+	R_MVEX $2, $1, $0, $0xd0, FR1(%rsp), $0, $RM_FS, $S_XFER	# the lanes to the slot
+	movl $0xd9, %eax			# fld dword
+	cmpl $0, FR0(%rsp)
+	je .Lcs_fld
+	movl $0xdd, %eax			# fld qword
+.Lcs_fld:
+	movl %eax, FR2(%rsp)
+	R_X87 FR2(%rsp), $0, $S_XFER
+	testl $1, %r14d
+	jz .Lcs_fistp
+	R_EM em_flags
+	R_X87 $0xd9, $7, $S_CW			# fnstcw [cw]
+	R_FSOP .Lb_movzx_w, $2, $0, $S_CW	# movzx eax, word [cw]
+	R_BYTES .Lb_or_ah_0c, $3		# round toward zero
+	R_BYTE $0x66
+	R_FSOP .Lb_mov_rm_r, $1, $0, $S_CW2	# mov [cw2], ax
+	R_X87 $0xd9, $5, $S_CW2			# fldcw [cw2]
+.Lcs_fistp:
+	R_X87 $0xdf, $7, $S_XFER		# fistp qword
+	testl $1, %r14d
+	jz .Lcs_result
+	R_X87 $0xd9, $5, $S_CW			# fldcw [cw]: back
+.Lcs_result:
+	movzbl IN_W(%r12), %eax
+	movl %eax, FR2(%rsp)
+	R_GPRR FD(%rsp), FR2(%rsp), $S_XFER
+	R_OK
+.Lcs_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+	.data
+	.balign 8
+xf2_permilps_var:	FORM MN_Vpermilps, xl_permute, 6, 0
+xf2_permd_narrow:	FORM MN_Vpermd, xl_permute, 7, 0
+xf2_vpermd_nds:		FORM MN_Vpermd, xl_nds, (2 | (1 << 8) | (0 << 16) | (0x36 << 24)), 0
+	.section .rodata
+s2_rounding:	.asciz "a scalar form with embedded rounding: not expressed yet"
+.Lb_mov_rax_rcx:	.byte 0x48, 0x8b, 0x01
+.Lb_mov_eax_rcxm:	.byte 0x8b, 0x01
+.Lb_movsxd_rax_rcx:	.byte 0x48, 0x63, 0x01
+.Lb_sar_rax_63:		.byte 0x48, 0xc1, 0xf8, 0x3f
+.Lb_mov_rcx_2p64:	.byte 0x48, 0xb9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x43
+.Lb_and_rax_rcx:	.byte 0x48, 0x21, 0xc8
+.Lb_movzx_w:		.byte 0x0f, 0xb7
+.Lb_or_ah_0c:		.byte 0x80, 0xcc, 0x0c
+.Lb_mov_rm_r:		.byte 0x89
+	.balign 64
+.Lc_odd01:	.long 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1
+.Lc_base_pd:	.long 0, 1, 0, 1, 4, 5, 4, 5, 8, 9, 8, 9, 12, 13, 12, 13
+.Lc_base_ps:	.long 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
+.Lc_2p31_d:	.quad 0x41e0000000000000, 0x41e0000000000000, 0x41e0000000000000, 0x41e0000000000000
+		.quad 0x41e0000000000000, 0x41e0000000000000, 0x41e0000000000000, 0x41e0000000000000
+	.text
+
+# ---- batch 2c (continued): the compare predicates above 7 ----
+
+# xl_cmp_ext: vcmpps/vcmppd with a predicate from 8 to 31, and vpcmpd/
+# vpcmpud with FALSE (3) or TRUE (7): the card's eight predicates with
+# the operands swapped, or two compares joined by kor, where AVX-512
+# has thirty-two; the constants from the length's lanes and the write
+# mask. (rewrite.rs compare.)
+xl_cmp_ext:
+	R_ENTER
+	movl XF_B(%r13), %eax
+	andl $XB_QWORD, %eax
+	movl %eax, FR1(%rsp)			# w
+	movl FD(%rsp), %eax
+	andl $7, %eax
+	movl %eax, FR2(%rsp)			# kd
+	movl FAAA(%rsp), %eax
+	movl %eax, FR3(%rsp)			# keff: {k} when full, else the lanes and {k}
+	cmpl $2, FLL(%rsp)
+	je .Lce_pred
+	R_LANES FR1(%rsp)
+	R_MASK %eax
+	movl %eax, FR3(%rsp)
+	cmpl $0, FAAA(%rsp)
+	je .Lce_pred
+	R_K2 em_kand, FR3(%rsp), FAAA(%rsp)
+.Lce_pred:
+	movzbl IN_IMM(%r12), %eax
+	movl %eax, FR0(%rsp)
+	cmpb $3, IN_MAP(%r12)
+	jne .Lce_float
+	andl $7, %eax
+	cmpl $3, %eax
+	jne .Lce_true
+.Lce_false:
+	R_MOVEAX $0
+	R_K2 em_kmov_k_r, FR2(%rsp), $0
+	R_OK
+.Lce_true:
+	cmpl $2, FLL(%rsp)
+	jne .Lce_copy
+	cmpl $0, FAAA(%rsp)
+	jne .Lce_copy
+	R_MOVEAX $0xffff
+	R_K2 em_kmov_k_r, FR2(%rsp), $0
+	R_OK
+.Lce_copy:
+	R_K2 em_kmov_kk, FR2(%rsp), FR3(%rsp)
+	R_OK
+.Lce_float:
+	cmpl $8, %eax
+	jb .Lce_shape
+	cmpl $32, %eax
+	jae .Lce_shape
+	subl $8, %eax
+	leaq .Lce_plan(%rip), %rcx
+	movzbl (%rcx,%rax,2), %edx
+	movzbl 1(%rcx,%rax,2), %esi
+	movl %edx, FR4(%rsp)			# the plan: predicate | swap << 4 | kind << 5
+	movl %esi, FR5(%rsp)			# the second compare: predicate | swap << 4
+	movl %edx, %eax
+	shrl $5, %eax
+	cmpl $1, %eax
+	je .Lce_false
+	cmpl $2, %eax
+	je .Lce_true
+	R_SRC2 FR1(%rsp), $XB_FLOAT, .Lce_notemp
+	movl %eax, %r15d			# s2
+	movl FR4(%rsp), %eax
+	andl $0xf, %eax
+	movl %eax, FR0(%rsp)
+	testl $0x10, FR4(%rsp)
+	jnz .Lce_swap
+	R_VCMP FR2(%rsp), FS1(%rsp), $RM_REG, %r15d, FR0(%rsp), FR3(%rsp), FR1(%rsp)
+	jmp .Lce_second
+.Lce_swap:
+	R_VCMP FR2(%rsp), %r15d, $RM_REG, FS1(%rsp), FR0(%rsp), FR3(%rsp), FR1(%rsp)
+.Lce_second:
+	movl FR4(%rsp), %eax
+	shrl $5, %eax
+	cmpl $3, %eax
+	jne .Lce_cut
+	# a second mask register: from k7 down, not kd, the scratch mask or {k}; its value kept in ecx
+	movl $7, %ecx
+.Lce_pick:
+	cmpl FR2(%rsp), %ecx
+	je .Lce_next
+	movzbl EM_KSCR(%rbx), %eax
+	cmpl %eax, %ecx
+	je .Lce_next
+	cmpl FAAA(%rsp), %ecx
+	je .Lce_next
+	jmp .Lce_picked
+.Lce_next:
+	decl %ecx
+	jnz .Lce_pick
+	movl $1, %ecx
+.Lce_picked:
+	movl %ecx, FR4(%rsp)			# k2
+	R_EM em_rcx
+	R_K2 em_kmov_r_k, $1, FR4(%rsp)
+	movl FR5(%rsp), %eax
+	andl $0xf, %eax
+	movl %eax, FR0(%rsp)
+	testl $0x10, FR5(%rsp)
+	jnz .Lce_swap2
+	R_VCMP FR4(%rsp), FS1(%rsp), $RM_REG, %r15d, FR0(%rsp), FR3(%rsp), FR1(%rsp)
+	jmp .Lce_join
+.Lce_swap2:
+	R_VCMP FR4(%rsp), %r15d, $RM_REG, FS1(%rsp), FR0(%rsp), FR3(%rsp), FR1(%rsp)
+.Lce_join:
+	R_K2 em_kor, FR2(%rsp), FR4(%rsp)
+	R_K2 em_kmov_k_r, FR4(%rsp), $1
+.Lce_cut:
+	cmpl $2, FLL(%rsp)
+	jne .Lce_and
+	cmpl $0, FAAA(%rsp)
+	je .Lce_ok
+.Lce_and:
+	R_K2 em_kand, FR2(%rsp), FR3(%rsp)
+.Lce_ok:
+	R_OK
+.Lce_shape:
+	leaq s_shape(%rip), %rax
+	R_LEAVE
+.Lce_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+# xl_cmp_k2: vcmpps, vcmppd, vpcmpd, vpcmpud: the card's own predicates
+# through xl_cmp_k, the rest through xl_cmp_ext.
+xl_cmp_k2:
+	movq EM_IN(%rdi), %rax
+	movzbl IN_IMM(%rax), %ecx
+	cmpb $3, IN_MAP(%rax)
+	jne 1f
+	andl $7, %ecx
+	cmpl $3, %ecx
+	je xl_cmp_ext
+	cmpl $7, %ecx
+	je xl_cmp_ext
+	jmp xl_cmp_k
+1:	cmpl $8, %ecx
+	jae xl_cmp_ext
+	jmp xl_cmp_k
+
+	.section .rodata
+	# the plan per predicate 8 to 31: the card's predicate | swap << 4 | kind << 5 (0 one compare, 1 FALSE, 2 TRUE, 3 two compares); the second compare's predicate | swap << 4
+.Lce_plan:
+	.byte 0x60, 0x03			# 8 EQ_UQ: eq or unordered
+	.byte 0x16, 0x00			# 9 NGE_US: nle(s2, s1)
+	.byte 0x15, 0x00			# 10 NGT_US: nlt(s2, s1)
+	.byte 0x20, 0x00			# 11 FALSE_OQ
+	.byte 0x61, 0x11			# 12 NEQ_OQ: lt or gt
+	.byte 0x12, 0x00			# 13 GE_OS: le(s2, s1)
+	.byte 0x11, 0x00			# 14 GT_OS: lt(s2, s1)
+	.byte 0x40, 0x00			# 15 TRUE_UQ
+	.byte 0x00, 0x00			# 16 EQ_OS
+	.byte 0x01, 0x00			# 17 LT_OQ
+	.byte 0x02, 0x00			# 18 LE_OQ
+	.byte 0x03, 0x00			# 19 UNORD_S
+	.byte 0x04, 0x00			# 20 NEQ_US
+	.byte 0x05, 0x00			# 21 NLT_UQ
+	.byte 0x06, 0x00			# 22 NLE_UQ
+	.byte 0x07, 0x00			# 23 ORD_S
+	.byte 0x60, 0x03			# 24 EQ_US
+	.byte 0x16, 0x00			# 25 NGE_UQ
+	.byte 0x15, 0x00			# 26 NGT_UQ
+	.byte 0x20, 0x00			# 27 FALSE_OS
+	.byte 0x61, 0x11			# 28 NEQ_OS
+	.byte 0x12, 0x00			# 29 GE_OQ
+	.byte 0x11, 0x00			# 30 GT_OQ
+	.byte 0x40, 0x00			# 31 TRUE_US
+	.text
+
+# ---- batch 2c (continued): division and square root ----
+
+# dexp(e, x): a double's biased exponent field (bits 62:52) into the odd
+# (high) dword lanes of e (the even lanes garbage), from x.
+	.macro R_DEXP e, x, fail
+	R_SHIFT $2, \e, $RM_REG, \x, $20
+	R_CONST_DW $0x7ff, \fail
+	movl %eax, FR5(%rsp)
+	R_I0F $0xdb, \e, \e, $RM_CONST, FR5(%rsp)
+	.endm
+# dsetexp(out, x, expo, t): x with its exponent field replaced: out = x,
+# the odd lanes = (x and 0x800fffff) or (expo << 20).
+	.macro R_DSETEXP out, x, expo, t, fail
+	R_MASK $0xaaaa
+	movl %eax, FR4(%rsp)
+	R_CONST_DW $0x800fffff, \fail
+	movl %eax, FR5(%rsp)
+	R_VMOV \out, $RM_REG, \x
+	R_I0F $0xdb, \out, \out, $RM_CONST, FR5(%rsp), FR4(%rsp)
+	R_SHIFT $6, \t, $RM_REG, \expo, $20
+	R_I0F $0xeb, \out, \out, $RM_REG, \t, FR4(%rsp)
+	.endm
+# dpow2(out, expo): a power of two as a double vector: 2^(expo - 1023),
+# expo the biased exponent in the odd lanes (the even lanes become zero).
+	.macro R_DPOW2 out, expo
+	R_SHIFT $6, \out, $RM_REG, \expo, $20
+	R_MASK $0x5555
+	movl %eax, FR4(%rsp)
+	R_ZERO \out, FR4(%rsp)
+	.endm
+# recip_ps(r, b, e): 1/b to float precision: vrcp23ps, one Newton step
+# (r = r + r (1 - b r)).
+	.macro R_RECIP r, b, e, fail
+	R_MVEX $2, $1, $0, $0xca, \r, $0, $RM_REG, \b
+	R_CONST_DW $0x3f800000, \fail
+	movl %eax, FR5(%rsp)
+	R_VMOV \e, $RM_CONST, FR5(%rsp)
+	R_FMA $0xbc, \e, \b, $RM_REG, \r		# e = 1 - b r
+	R_FMA $0xb8, \r, \e, $RM_REG, \r		# r = e r + r
+	.endm
+
+# xl_divsqrt: vdivps (XF_A 0), vdivpd (1), vsqrtps (2), vsqrtpd (3),
+# which the card lacks: Newton-Raphson from its 23-bit estimates
+# (vrcp23ps, vrsqrt23ps), then one residual step with a fused
+# multiply-add. Doubles are first scaled by a power of two into [1, 4)
+# through their exponent field (so the float seed cannot overflow or
+# underflow), seeded through float, refined twice, and scaled back
+# exactly. Zero, infinity and NaN operands are fixed up from the
+# operands themselves. (rewrite.rs divsqrt; the scalar forms are
+# xl_divs and xl_sqrts.) Registers: r14 = r, r15 = e; the frame: FR0 q,
+# FR1 ex, FR2 kx, FR3 a or b, FR4 and FR5 masks and constants.
+xl_divsqrt:
+	R_ENTER
+	cmpb $0, IN_B(%r12)
+	je .Lds_b
+	cmpb $3, IN_MOD(%r12)
+	je .Lds_rounding
+.Lds_b:
+	R_SRC2 $0, $XB_FLOAT, .Lds_notemp
+	movl %eax, FR3(%rsp)			# the divisor b, or the operand a of a square root
+	R_TEMP .Lds_notemp
+	movl %eax, %r14d			# r
+	R_TEMP .Lds_notemp
+	movl %eax, %r15d			# e
+	R_TEMP .Lds_notemp
+	movl %eax, FR0(%rsp)			# q
+	R_EM em_k
+	movl %eax, FR2(%rsp)			# kx
+	movl XF_A(%r13), %eax
+	cmpl $1, %eax
+	je .Lds_divpd
+	cmpl $2, %eax
+	je .Lds_sqrtps
+	cmpl $3, %eax
+	je .Lds_sqrtpd
+	# vdivps: a / b, a = s1 (vvvv)
+	R_RECIP %r14d, FR3(%rsp), %r15d, .Lds_notemp
+	R_VMULP FR0(%rsp), FS1(%rsp), $RM_REG, %r14d	# q = a r
+	R_VMOV %r15d, $RM_REG, FS1(%rsp)
+	R_FMA $0xbc, %r15d, FR3(%rsp), $RM_REG, FR0(%rsp)	# e = a - b q
+	R_FMA $0xb8, FR0(%rsp), %r15d, $RM_REG, %r14d		# q = e r + q
+	# b zero or infinite (the refinement made NaN of it): a times the raw estimate
+	R_MVEX $2, $1, $0, $0xca, %r14d, $0, $RM_REG, FR3(%rsp)
+	R_VMULP %r14d, FS1(%rsp), $RM_REG, %r14d
+	R_CONST_DW $0x7fffffff, .Lds_notemp
+	movl %eax, FR4(%rsp)
+	R_I0F $0xdb, %r15d, FR3(%rsp), $RM_CONST, FR4(%rsp)	# e = |b|
+	R_CONST_DW $0, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), %r15d, $RM_CONST, FR5(%rsp), $0
+	R_VMOV FR0(%rsp), $RM_REG, %r14d, FR2(%rsp)
+	R_CONST_DW $0x7f800000, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), %r15d, $RM_CONST, FR5(%rsp), $0
+	R_VMOV FR0(%rsp), $RM_REG, %r14d, FR2(%rsp)
+	# a infinite: the residual is inf - inf; the raw product is right
+	R_I0F $0xdb, %r15d, FS1(%rsp), $RM_CONST, FR4(%rsp)	# e = |a|
+	R_VCMP FR2(%rsp), %r15d, $RM_CONST, FR5(%rsp), $0
+	R_VMOV FR0(%rsp), $RM_REG, %r14d, FR2(%rsp)
+	R_COMMIT FD(%rsp), FR0(%rsp), $0
+	R_OK
+.Lds_divpd:
+	R_TEMP .Lds_notemp
+	movl %eax, FR1(%rsp)			# ex
+	# r = b' (b with the exponent 1023: in [1, 2)); ex = a times 2^(1023 - E), exact
+	R_DEXP FR1(%rsp), FR3(%rsp), .Lds_notemp
+	R_CONST_DW $1023, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR5(%rsp)
+	R_DSETEXP %r14d, FR3(%rsp), %r15d, FR0(%rsp), .Lds_notemp
+	R_CONST_DW $2046, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR5(%rsp)
+	R_I0F $0xfa, %r15d, %r15d, $RM_REG, FR1(%rsp)
+	R_DPOW2 FR1(%rsp), %r15d
+	R_VMULP FR1(%rsp), FR1(%rsp), $RM_REG, FS1(%rsp), $1
+	# q = 1 / b': seeded through float, two Newton steps
+	R_MVEX $1, $1, $1, $0x5a, %r15d, $0, $RM_REG, %r14d		# vcvtpd2ps
+	R_MVEX $2, $1, $0, $0xca, %r15d, $0, $RM_REG, %r15d		# vrcp23ps
+	R_MVEX $1, $0, $0, $0x5a, FR0(%rsp), $0, $RM_REG, %r15d	# vcvtps2pd
+	R_CONST .Lc_one_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	movl $2, FR4(%rsp)
+.Lds_newton_d:
+	R_VMOV %r15d, $RM_CONST, FR5(%rsp), $0, $1
+	R_FMA $0xbc, %r15d, %r14d, $RM_REG, FR0(%rsp), $1		# e = 1 - b' q
+	R_FMA $0xb8, FR0(%rsp), %r15d, $RM_REG, FR0(%rsp), $1	# q = e q + q
+	decl FR4(%rsp)
+	jnz .Lds_newton_d
+	# e = the quotient; ex = the residual; e += residual times reciprocal
+	R_VMULP %r15d, FR1(%rsp), $RM_REG, FR0(%rsp), $1
+	R_FMA $0xbc, FR1(%rsp), %r14d, $RM_REG, %r15d, $1		# ex = aS - b' e
+	R_FMA $0xb8, %r15d, FR1(%rsp), $RM_REG, FR0(%rsp), $1	# e = ex q + e
+	# fix-ups: b zero (a signed infinity, NaN for 0/0), b infinite (a signed zero), NaN in
+	R_I0F $0xef, FR0(%rsp), FS1(%rsp), $RM_REG, FR3(%rsp), $0, $1
+	R_CONST .Lc_sign_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_I0F $0xdb, FR0(%rsp), FR0(%rsp), $RM_CONST, FR5(%rsp), $0, $1	# q = the result's sign
+	R_CONST .Lc_abs_d, .Lds_notemp
+	movl %eax, FR4(%rsp)
+	R_I0F $0xdb, %r14d, FR3(%rsp), $RM_CONST, FR4(%rsp), $0, $1	# r = |b|
+	R_CONST .Lc_zero_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), %r14d, $RM_CONST, FR5(%rsp), $0, $0, $1
+	R_CONST .Lc_inf_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_I0F $0xeb, FR1(%rsp), FR0(%rsp), $RM_CONST, FR5(%rsp), $0, $1
+	R_VMOV %r15d, $RM_REG, FR1(%rsp), FR2(%rsp), $1		# a / 0 = a signed infinity
+	R_VCMP FR2(%rsp), %r14d, $RM_CONST, FR5(%rsp), $0, $0, $1
+	R_VMOV %r15d, $RM_REG, FR0(%rsp), FR2(%rsp), $1		# a / inf = a signed zero
+	R_I0F $0xdb, FR1(%rsp), FS1(%rsp), $RM_CONST, FR4(%rsp), $0, $1	# ex = |a|
+	R_MVEX $1, $1, $1, $0x58, %r14d, %r14d, $RM_REG, FR1(%rsp)	# |a| + |b|
+	R_CONST .Lc_zero_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), %r14d, $RM_CONST, FR5(%rsp), $0, $0, $1
+	R_CONST .Lc_nan_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VMOV %r15d, $RM_CONST, FR5(%rsp), FR2(%rsp), $1		# 0 / 0
+	R_VCMP FR2(%rsp), FS1(%rsp), $RM_REG, FS1(%rsp), $3, $0, $1
+	R_VMOV %r15d, $RM_REG, FS1(%rsp), FR2(%rsp), $1
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_REG, FR3(%rsp), $3, $0, $1
+	R_VMOV %r15d, $RM_REG, FR3(%rsp), FR2(%rsp), $1
+	R_COMMIT FD(%rsp), %r15d, $1
+	R_OK
+.Lds_sqrtps:
+	# sqrt(a) = a rsqrt(a), refined; 0 and infinity give themselves
+	R_MVEX $2, $1, $0, $0xcb, %r14d, $0, $RM_REG, FR3(%rsp)	# vrsqrt23ps
+	R_CONST_DW $0x3f000000, .Lds_notemp
+	movl %eax, FR4(%rsp)			# 0.5
+	R_CONST_DW $0x3fc00000, .Lds_notemp
+	movl %eax, FR5(%rsp)			# 1.5
+	R_VMULP %r15d, FR3(%rsp), $RM_REG, %r14d
+	R_VMULP %r15d, %r15d, $RM_REG, %r14d
+	R_VMOV FR0(%rsp), $RM_CONST, FR5(%rsp)
+	R_FMA $0xbc, FR0(%rsp), %r15d, $RM_CONST, FR4(%rsp)
+	R_VMULP %r14d, %r14d, $RM_REG, FR0(%rsp)
+	R_VMULP FR0(%rsp), FR3(%rsp), $RM_REG, %r14d
+	R_VMOV %r15d, $RM_REG, FR3(%rsp)
+	R_FMA $0xbc, %r15d, FR0(%rsp), $RM_REG, FR0(%rsp)
+	R_VMULP %r14d, %r14d, $RM_CONST, FR4(%rsp)
+	R_FMA $0xb8, FR0(%rsp), %r15d, $RM_REG, %r14d
+	R_CONST_DW $0, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_CONST, FR5(%rsp), $0
+	R_VMOV FR0(%rsp), $RM_REG, FR3(%rsp), FR2(%rsp)
+	R_CONST_DW $0x7f800000, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_CONST, FR5(%rsp), $0
+	R_VMOV FR0(%rsp), $RM_REG, FR3(%rsp), FR2(%rsp)
+	R_COMMIT FD(%rsp), FR0(%rsp), $0
+	R_OK
+.Lds_sqrtpd:
+	R_TEMP .Lds_notemp
+	movl %eax, FR1(%rsp)			# ex
+	# r = a' = a with the exponent 1023 + p, p the parity of E - 1023, so a' is in [1, 4)
+	# and the shift back is even; ex = 2^((E - 1023 - p) / 2)
+	R_DEXP FR1(%rsp), FR3(%rsp), .Lds_notemp
+	R_CONST_DW $1, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_I0F $0xfe, %r15d, FR1(%rsp), $RM_CONST, FR5(%rsp)
+	R_I0F $0xdb, %r15d, %r15d, $RM_CONST, FR5(%rsp)		# p
+	R_CONST_DW $1023, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_I0F $0xfe, %r15d, %r15d, $RM_CONST, FR5(%rsp)		# 1023 + p
+	R_DSETEXP %r14d, FR3(%rsp), %r15d, FR0(%rsp), .Lds_notemp
+	R_I0F $0xfa, FR0(%rsp), FR1(%rsp), $RM_REG, %r15d		# E - (1023 + p)
+	R_CONST_DW $2046, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_I0F $0xfe, FR0(%rsp), FR0(%rsp), $RM_CONST, FR5(%rsp)	# + 2046
+	R_SHIFT $4, FR0(%rsp), $RM_REG, FR0(%rsp), $1		# / 2: the biased exponent of the scale
+	R_DPOW2 FR1(%rsp), FR0(%rsp)
+	# q = rsqrt(a') seeded through float, two Newton steps: y = 1.5 y - 0.5 a' y^3
+	R_MVEX $1, $1, $1, $0x5a, %r15d, $0, $RM_REG, %r14d
+	R_MVEX $2, $1, $0, $0xcb, %r15d, $0, $RM_REG, %r15d
+	R_MVEX $1, $0, $0, $0x5a, FR0(%rsp), $0, $RM_REG, %r15d
+	R_CONST .Lc_half_d, .Lds_notemp
+	movl %eax, FR4(%rsp)
+	R_CONST .Lc_mhalf_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	movl $2, FR3 + 4(%rsp)			# the iteration count (FR3's high dword; a is still in its low)
+.Lds_newton_s:
+	R_VMULP %r15d, %r14d, $RM_REG, FR0(%rsp), $1
+	R_VMULP %r15d, %r15d, $RM_REG, FR0(%rsp), $1
+	R_VMULP %r15d, %r15d, $RM_REG, FR0(%rsp), $1
+	R_VMULP %r15d, %r15d, $RM_CONST, FR5(%rsp), $1		# -0.5 a' y^3
+	R_FMA $0xb8, FR0(%rsp), FR0(%rsp), $RM_CONST, FR4(%rsp), $1	# q = 0.5 q + q
+	R_MVEX $1, $1, $1, $0x58, FR0(%rsp), FR0(%rsp), $RM_REG, %r15d	# + e
+	decl FR3 + 4(%rsp)
+	jnz .Lds_newton_s
+	# s = a' y; s += (a' - s s) 0.5 y; then scaled
+	R_VMULP %r15d, %r14d, $RM_REG, FR0(%rsp), $1
+	R_VMULP FR0(%rsp), FR0(%rsp), $RM_CONST, FR4(%rsp), $1
+	R_FMA $0xbc, %r14d, %r15d, $RM_REG, %r15d, $1		# r = a' - s s
+	R_FMA $0xb8, %r15d, %r14d, $RM_REG, FR0(%rsp), $1		# e = r q + e
+	R_VMULP %r15d, %r15d, $RM_REG, FR1(%rsp), $1
+	R_CONST .Lc_zero_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_CONST, FR5(%rsp), $0, $0, $1
+	R_VMOV %r15d, $RM_REG, FR3(%rsp), FR2(%rsp), $1
+	R_CONST .Lc_inf_d, .Lds_notemp
+	movl %eax, FR5(%rsp)
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_CONST, FR5(%rsp), $0, $0, $1
+	R_VMOV %r15d, $RM_REG, FR3(%rsp), FR2(%rsp), $1
+	R_VCMP FR2(%rsp), FR3(%rsp), $RM_REG, FR3(%rsp), $3, $0, $1
+	R_VMOV %r15d, $RM_REG, FR3(%rsp), FR2(%rsp), $1
+	R_COMMIT FD(%rsp), %r15d, $1
+	R_OK
+.Lds_rounding:
+	leaq s2_rounding(%rip), %rax
+	R_LEAVE
+.Lds_notemp:
+	leaq s_no_temp(%rip), %rax
+	R_LEAVE
+
+	.section .rodata
+	.balign 64
+.Lc_one_d:	.quad 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000, 0x3ff0000000000000
+.Lc_half_d:	.quad 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000
+.Lc_mhalf_d:	.quad 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000, 0xbfe0000000000000
+.Lc_abs_d:	.quad 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff, 0x7fffffffffffffff
+.Lc_sign_d:	.quad 0x8000000000000000, 0x8000000000000000, 0x8000000000000000, 0x8000000000000000, 0x8000000000000000, 0x8000000000000000, 0x8000000000000000, 0x8000000000000000
+.Lc_zero_d:	.quad 0, 0, 0, 0, 0, 0, 0, 0
+.Lc_inf_d:	.quad 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000, 0x7ff0000000000000
+.Lc_nan_d:	.quad 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000, 0xfff8000000000000
+	.text
+
+# xl_cmp_vec: vcmpps, vcmppd, vpcmpeqd, vpcmpgtd: the EVEX forms into a
+# mask register (xl_cmp_k2); a VEX form writes a vector of all-ones and
+# zero lanes: the compare into the scratch mask (its number put in the
+# block's reg field for the mask recipe, the destination restored
+# after), the destination zeroed and set to all ones under it.
+xl_cmp_vec:
+	movq EM_IN(%rdi), %rax
+	cmpb $2, IN_ENC(%rax)
+	jne 1f
+	jmp xl_cmp_k2
+1:	R_ENTER
+	R_EM em_k
+	movl %eax, FR0(%rsp)			# ks
+	movb %al, IN_REG(%r12)
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	call xl_cmp_k2
+	movl FD(%rsp), %ecx
+	movb %cl, IN_REG(%r12)
+	testq %rax, %rax
+	jnz .Lcv_out
+	R_CONST_DW $-1, .Lcv_notemp
+	movl %eax, FR2(%rsp)
+	movl XF_B(%r13), %eax
+	andl $XB_QWORD, %eax
+	movl %eax, FR3(%rsp)
+	R_ZERO FD(%rsp)
+	R_VMOV FD(%rsp), $RM_CONST, FR2(%rsp), FR0(%rsp), FR3(%rsp)
+	R_OK
+.Lcv_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lcv_out:
+	R_LEAVE
+
+# xl_cmpq_vec: vpcmpgtq: the EVEX form into a mask (xl_cmpq_pred); the
+# VEX form into a vector of all-ones and zero qwords: the compare into
+# the scratch mask, the destination zeroed and set under it (W1: the
+# mask per qword).
+xl_cmpq_vec:
+	movq EM_IN(%rdi), %rax
+	cmpb $2, IN_ENC(%rax)
+	jne 1f
+	jmp xl_cmpq_pred
+1:	R_ENTER
+	R_EM em_k
+	movl %eax, FR0(%rsp)
+	movb %al, IN_REG(%r12)
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	call xl_cmpq_pred
+	movl FD(%rsp), %ecx
+	movb %cl, IN_REG(%r12)
+	testq %rax, %rax
+	jnz .Lcqv_out
+	R_CONST_DW $-1, .Lcqv_notemp
+	movl %eax, FR2(%rsp)
+	R_ZERO FD(%rsp)
+	R_VMOV FD(%rsp), $RM_CONST, FR2(%rsp), FR0(%rsp), $1
+	R_OK
+.Lcqv_notemp:
+	leaq s_no_temp(%rip), %rax
+.Lcqv_out:
+	R_LEAVE
