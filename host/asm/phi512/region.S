@@ -250,6 +250,11 @@ region_run:
 	movq CD_SLOTP(%rbx), %rcx
 	movl SLOT_REPLY + SR_EXIT_KIND(%rcx), %eax
 	movq %rax, 16(%rsp)
+	cmpl $15, %eax				# counted by kind (the progress line)
+	ja 31f
+	leaq stat_exit(%rip), %rdx
+	incq (%rdx,%rax,8)
+31:
 	movq SLOT_REPLY + SR_EXIT_RIP(%rcx), %rax	# kept before any other request reuses the reply
 	movq %rax, 40(%rsp)
 	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %r15
@@ -446,6 +451,8 @@ region_run:
 	jmp 79f
 76:	cmpl $X_CALL, 16(%rsp)
 	jne 79f
+	movq exit_aux(%rip), %rdi		# a compute-library callee the card has no blob for: translated and loaded now
+	call callee_promote
 	movq exit_aux(%rip), %rdi		# a PLT stub that now resolves to a function the card holds: an alias on the cards
 	call alias_check
 	movq %r12, %rdi				# a call of plain code: it runs on the host, its return comes back here
@@ -1927,6 +1934,8 @@ hb_t0:		.skip 8			# the constructor's now_ns (main.S)
 hb_last:	.skip 8			# the last line's now_ns
 hb_regions:	.skip 8			# stat_regions at the last line
 hb_rns:		.skip 8			# stat_region_ns at the last line
+	.globl stat_exit
+stat_exit:	.skip 16 * 8		# region exits by kind
 	.section .rodata
 s_hb1:	.asciz "phi512: progress at "
 s_hb2:	.asciz " s: "
@@ -1937,8 +1946,17 @@ s_hb6:	.asciz " fault(s), "
 s_hb7:	.asciz " write-back line(s), "
 s_hb8:	.asciz " chunk fill(s) ("
 s_hb9:	.asciz " read-only), "
-s_hb10:	.asciz " eviction(s); last region in "
+s_hb10:	.asciz " eviction(s)"
+s_hb20:	.asciz "; last region in "
 s_hb11:	.asciz "; most regions: "
+s_hb12:	.asciz "; exits ret "
+s_hb13:	.asciz ", call "
+s_hb14:	.asciz ", host "
+s_hb15:	.asciz ", syscall "
+s_hb16:	.asciz ", fault "
+s_hb17:	.asciz ", jump "
+s_hb18:	.asciz ", callees translated "
+s_hb19:	.asciz ", trampolines "
 	.text
 	.globl heartbeat
 heartbeat:
@@ -2019,8 +2037,42 @@ heartbeat:
 	call w_dec
 	leaq s_hb10(%rip), %rsi
 	call w_str
+	leaq s_hb12(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_RET(%rip), %rdi
+	call w_dec
+	leaq s_hb13(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_CALL(%rip), %rdi
+	call w_dec
+	leaq s_hb14(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_HOST(%rip), %rdi
+	call w_dec
+	leaq s_hb15(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_SYSCALL(%rip), %rdi
+	call w_dec
+	leaq s_hb16(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_FAULT(%rip), %rdi
+	call w_dec
+	leaq s_hb17(%rip), %rsi
+	call w_str
+	movq stat_exit + 8 * X_JUMP(%rip), %rdi
+	call w_dec
+	leaq s_hb18(%rip), %rsi
+	call w_str
+	movq stat_callee(%rip), %rdi
+	call w_dec
+	leaq s_hb19(%rip), %rsi
+	call w_str
+	movq stat_tramp(%rip), %rdi
+	call w_dec
 	testq %r12, %r12
 	jz 1f
+	leaq s_hb20(%rip), %rsi
+	call w_str
 	movq %r12, %rsi
 	call w_str
 	# the interval's three busiest functions by regions
@@ -2991,6 +3043,63 @@ dt_scan_all:
 4:	addq $WU_BYTES, %rbx
 	decq %r12
 	jmp 1b
+9:	popq %r12
+	popq %rbx
+	ret
+
+# callee_promote(callee rdi): a region left the card to call a function
+# the card has no blob for; when it lies in the compute library (through
+# its PLT stub or not), it is translated and loaded on every card now
+# (seed_prepare: K_LOAD puts it in the in-card call table), so its next
+# call stays on the card (alias_check then aliases the stub). Plain C
+# functions are translated as they are; what the card cannot run in them
+# leaves the card from inside (lazy sites). 2026-10-14: the graph thread
+# on the card left it ~280 times a second at such calls.
+	.bss
+	.balign 8
+	.globl stat_callee
+stat_callee:	.skip 8
+	.text
+callee_promote:
+	pushq %rbx
+	pushq %r12
+	call plt_resolve
+	movq %rax, %rbx				# the function
+	movq %rbx, %rdi
+	call cont_obj_ok
+	testl %eax, %eax
+	jz 9f
+	# a seed holding it already?
+	leaq seeds(%rip), %r12
+	xorl %ecx, %ecx
+1:	cmpq nseeds(%rip), %rcx
+	jae 3f
+	movq SD_ADDR(%r12), %rax
+	testq %rax, %rax
+	jz 2f
+	cmpq %rax, %rbx
+	jb 2f
+	addq SD_LEN(%r12), %rax
+	cmpq %rax, %rbx
+	jb 4f
+2:	addq $SD_BYTES, %r12
+	incq %rcx
+	jmp 1b
+3:	movq %rbx, %rdi
+	call seed_dyn_add
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %r12
+4:	cmpq $0, SD_ABLOB(%r12)
+	jne 9f					# held (the miss was the stub: alias_check)
+	cmpq $0, SD_REFUSED(%r12)
+	jne 9f
+	movq %r12, %rdi
+	movq SD_ADDR(%r12), %rsi
+	call seed_prepare
+	cmpq $-1, %rax
+	je 9f
+	incq stat_callee(%rip)
 9:	popq %r12
 	popq %rbx
 	ret

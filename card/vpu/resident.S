@@ -1015,7 +1015,7 @@ s_rmf3:	.asciz ": resv_free 0 or mremap gave "
 # SD_WB): the reply's wb_n, or -1 when they do not fit (the host then
 # pulls the units as before). The host applies them byte by byte against
 # its own shadow, as it did with the pulled units.
-	.set WD_SLICES_MAX, 32
+	.set WD_SLICES_MAX, 110			# the slot's whole pool (2 threads on each of 55 cores): the compare is memory-bound (rs12: card 72.7% busy, 1.87 ms a request with 32)
 	.set WD_TAB_MAX, (SD_WB - SD_WB_TAB) / 16
 	.bss
 	.balign 64

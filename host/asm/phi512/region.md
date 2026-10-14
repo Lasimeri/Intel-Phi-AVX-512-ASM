@@ -246,3 +246,13 @@ unit's pages written since and protects them again; `wu_refresh_unit`
 skips a unit with none (and no forced range) without reading it. A unit
 the kernel will not register, or whose scan fails, keeps the full
 compare. `PHI512_DIRTY=0` turns it off.
+
+## Callee translation and the exits in the progress line (2026-10-14)
+
+`callee_promote`, at every `X_CALL` exit: a callee in the compute library
+(through its PLT stub or not) that has no blob is translated and loaded
+on every card at once, so its next call stays on the card (llama-server:
+the graph thread's regions fell from ~1,410 to 7 every 5 s). The
+progress line now counts the region exits by kind (returns, calls, host
+instructions, syscalls, faults, jumps), the callees translated and the
+trampolines.
