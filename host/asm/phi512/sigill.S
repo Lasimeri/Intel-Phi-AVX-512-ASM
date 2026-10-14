@@ -100,7 +100,17 @@ phi512_sigill:
 	call now_ns
 	movq %rax, 0(%rsp)
 	movq UC_GREGS + 8 * G_RIP(%rbx), %r12	# rip
-	call seed_of				# r12 -> the seed in rax, or 0
+	leaq phi512_tramp(%rip), %rax		# a plain callee returned through the trap (region.S tramp_setup):
+	cmpq %rax, %r12				# its caller goes on on the card at the return site
+	jne 96f
+	movq %rbx, %rdi
+	call tramp_resume
+	testq %rax, %rax
+	jz .Lunknown
+	movq %rax, %r13
+	movq %rdx, %rax
+	jmp 95f
+96:	call seed_of				# r12 -> the seed in rax, or 0
 	testq %rax, %rax
 	jz .Lunknown
 	movq %rax, %r13				# the seed
@@ -109,7 +119,7 @@ phi512_sigill:
 	call seed_prepare
 	cmpq $-1, %rax
 	je .Lunknown
-	movq %rax, cur_entry(%rip)
+95:	movq %rax, cur_entry(%rip)
 	# a seed without a plan (every function found at a fault): the region path
 	cmpl $OPK_NONE, SD_OPS + OP_KIND(%r13)
 	jne 0f
@@ -118,8 +128,15 @@ phi512_sigill:
 	movq %rbx, %rdi
 	movq %r13, %rsi
 	movq %rax, %rdx
-	call region_run
-	testl %eax, %eax
+94:	call region_run
+	cmpl $2, %eax				# it ended in another function with a blob: go on there
+	jne 93f
+	movq next_seed(%rip), %r13
+	movq %rbx, %rdi
+	movq %r13, %rsi
+	movq next_entry(%rip), %rdx
+	jmp 94b
+93:	testl %eax, %eax
 	jz .Lout
 	movl %eax, 24(%rsp)
 	movq $0, 32(%rsp)

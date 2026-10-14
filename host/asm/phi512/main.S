@@ -22,6 +22,8 @@ s_env_heapcheck: .asciz "PHI512_HEAPCHECK"
 s_env_incall:	.asciz "PHI512_INCALL"
 s_env_cardwb:	.asciz "PHI512_CARDWB"
 s_env_promote:	.asciz "PHI512_PROMOTE"
+s_env_cont:	.asciz "PHI512_CONT"
+s_env_tany:	.asciz "PHI512_TRAMP_ANY"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -95,6 +97,17 @@ phi512_init:
 	testq %rax, %rax
 	sete %cl
 	movq %rcx, promote_off(%rip)
+	leaq s_env_cont(%rip), %rdi		# PHI512_CONT=0: no continuation after a return, no trampoline (region.S)
+	movl $1, %esi
+	call env_u64
+	xorl %ecx, %ecx
+	testq %rax, %rax
+	sete %cl
+	movq %rcx, cont_off(%rip)
+	leaq s_env_tany(%rip), %rdi
+	xorl %esi, %esi
+	call env_u64
+	movq %rax, tramp_any(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f

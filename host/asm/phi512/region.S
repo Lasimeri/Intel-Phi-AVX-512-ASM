@@ -251,6 +251,7 @@ region_run:
 	movq SLOT_REPLY + SR_EXIT_RIP(%rcx), %rax	# kept before any other request reuses the reply
 	movq %rax, 40(%rsp)
 	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %r15
+	movq %r15, exit_aux(%rip)		# (the callee of an X_CALL: tramp_setup)
 	movl SLOT_REPLY + SR_SIGINFO(%rcx), %eax
 	movq %rax, 24(%rsp)			# (the units-before word is free now)
 	cmpl $X_FAULT, 16(%rsp)
@@ -423,7 +424,26 @@ region_run:
 	movq %r13, %rdi
 	movq UC_GREGS + 8 * G_RIP(%r12), %rsi	# the return address the host goes on at
 	call promote_check
-78:	call now_ns
+78:	movl $0, cont_rc(%rip)
+	cmpq $0, cont_off(%rip)
+	jne 79f
+	cmpl $X_RET, 16(%rsp)
+	jne 76f
+	movq UC_GREGS + 8 * G_RIP(%r12), %rdi	# returned into a function with a blob: go on there on the card
+	call blob_seed_at
+	testq %rax, %rax
+	jz 79f
+	movq %rax, next_seed(%rip)
+	movq %rdx, next_entry(%rip)
+	movl $2, cont_rc(%rip)
+	incq stat_cont(%rip)
+	jmp 79f
+76:	cmpl $X_CALL, 16(%rsp)
+	jne 79f
+	movq %r12, %rdi				# a call of plain code: it runs on the host, its return comes back here
+	movq exit_aux(%rip), %rsi
+	call tramp_setup
+79:	call now_ns
 	subq 8(%rsp), %rax
 	addq %rax, stat_region_ns(%rip)
 	movq %rax, %r15
@@ -468,7 +488,7 @@ region_run:
 	call w_us
 	movl $2, %edi
 	call l_end
-2:	xorl %eax, %eax
+2:	movl cont_rc(%rip), %eax		# 0, or 2: go on in next_seed at next_entry (sigill.S)
 	jmp .Lrg_out
 .Lrg_gp:
 	cmpq $0, verbose(%rip)
@@ -2450,4 +2470,206 @@ patch_entry:
 9:	popq %r13
 	popq %r12
 	popq %rbx
+	ret
+
+# Staying on the card across plain code (2026-10-14). A region that ends
+# returning into a function with a blob goes on there at once
+# (blob_seed_at -> cont_rc 2, next_seed/next_entry for sigill.S's loop);
+# a region that ends calling plain code (an X_CALL the card's table did
+# not have) has that callee run on the host with a trap return address
+# (tramp_setup): its return lands on phi512_tramp's ud2, and tramp_resume
+# posts the caller's blob at the return site. Only for callers in ggml's
+# libraries (their callees are C or libc, nothing throws: a C++ exception
+# could not unwind through the trap). Without these, a promoted caller
+# left the card at its first plain call and ran natively from there
+# (rs6: ggml_vec_dot_f32 still ~900 regions every 5 s under a promoted
+# ggml_compute_forward_gated_delta_net). PHI512_CONT=0 turns both off.
+	.set TR_MAX, 1024
+	.set TR_KEY, 0
+	.set TR_SEED, 8
+	.set TR_OFF, 16
+	.set TR_RET, 24
+	.set TR_BYTES, 32
+	.bss
+	.balign 8
+	.globl cont_off, stat_cont, stat_tramp, next_seed, next_entry
+exit_aux:	.skip 8
+cont_rc:	.skip 8
+cont_off:	.skip 8			# PHI512_CONT=0 (main.S)
+	.globl tramp_any
+tramp_any:	.skip 8			# PHI512_TRAMP_ANY=1 (main.S)
+next_seed:	.skip 8
+next_entry:	.skip 8
+stat_cont:	.skip 8			# continuations after a return
+stat_tramp:	.skip 8			# plain calls run under a trap return
+tr_next:	.skip 8
+tr_tab:		.skip TR_MAX * TR_BYTES
+	.balign 8
+tr_dec:		.skip 96			# IN_BYTES (x86dec.inc): x86_decode's out
+	.section .rodata
+s_libggml:	.asciz "libggml"
+	.text
+	.globl phi512_tramp
+phi512_tramp:
+	ud2
+
+# blob_seed_at(address rdi): the seed whose function holds the address
+# and has an automatic blob, in rax, and the blob offset of the
+# instruction there in rdx; rax 0 when none.
+	.globl blob_seed_at
+blob_seed_at:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %r12
+	cmpq $0, handblobs(%rip)
+	jne 8f
+	leaq seeds(%rip), %rbx
+	xorl %r13d, %r13d
+1:	cmpq nseeds(%rip), %r13
+	jae 8f
+	movq SD_ADDR(%rbx), %rax
+	testq %rax, %rax
+	jz 2f
+	cmpq %rax, %r12
+	jb 2f
+	addq SD_LEN(%rbx), %rax
+	cmpq %rax, %r12
+	jb 3f
+2:	addq $SD_BYTES, %rbx
+	incq %r13
+	jmp 1b
+3:	cmpq $0, SD_ABLOB(%rbx)
+	je 8f
+	cmpq $0, SD_REFUSED(%rbx)
+	jne 8f
+	movq %rbx, %rdi
+	movq %r12, %rsi
+	call seed_entry
+	cmpq $-1, %rax
+	je 8f
+	movq %rax, %rdx
+	movq %rbx, %rax
+	jmp 9f
+8:	xorl %eax, %eax
+	xorl %edx, %edx
+9:	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# tramp_setup(uc rdi, callee rsi): the frame stands at a call site (the
+# X_CALL exit); when its function has a blob and lives in ggml's
+# libraries, the call is made here instead: the trap's address pushed as
+# the return address, rip the callee, and {rsp after the return, the
+# caller's seed, the blob offset of the return site, the return site}
+# kept for tramp_resume. Else the frame is left as it is (the host runs
+# the call and goes on natively).
+tramp_setup:
+	cmpq $0, cont_off(%rip)
+	jne 99f
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq UC_GREGS + 8 * G_RIP(%rbx), %r13	# the call site
+	movq %r13, %rdi
+	call obj_at
+	testq %rax, %rax
+	jz 9f
+	cmpq $0, tramp_any(%rip)		# (PHI512_TRAMP_ANY=1: any object, for the gate's test program)
+	jne 91f
+	leaq OBJ_PATH(%rax), %rdi		# "libggml" in the object's path
+	leaq s_libggml(%rip), %rsi
+	call str_has
+	testl %eax, %eax
+	jz 9f
+91:
+	movq %r13, %rdi
+	movl $15, %esi
+	leaq tr_dec(%rip), %rdx
+	movq %r13, %rcx
+	call x86_decode
+	testq %rax, %rax
+	jz 9f
+	leaq (%r13,%rax), %r14			# the return site
+	movq %r14, %rdi
+	call blob_seed_at
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %r15				# the caller's seed (rdx the offset)
+	movq tr_next(%rip), %rcx
+	movq %rcx, %rax
+	incq %rax
+	andq $TR_MAX - 1, %rax
+	movq %rax, tr_next(%rip)
+	imulq $TR_BYTES, %rcx, %rcx
+	leaq tr_tab(%rip), %rax
+	addq %rax, %rcx
+	movq UC_GREGS + 8 * G_RSP(%rbx), %rax
+	movq %rax, TR_KEY(%rcx)			# rsp once the callee has returned
+	movq %r15, TR_SEED(%rcx)
+	movq %rdx, TR_OFF(%rcx)
+	movq %r14, TR_RET(%rcx)
+	subq $8, %rax
+	leaq phi512_tramp(%rip), %rdx
+	movq %rdx, (%rax)			# the return address: the trap
+	movq %rax, UC_GREGS + 8 * G_RSP(%rbx)
+	movq %r12, UC_GREGS + 8 * G_RIP(%rbx)	# into the callee
+	incq stat_tramp(%rip)
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+99:	ret
+
+# tramp_resume(uc rdi): the trap fired: the entry whose rsp is the
+# frame's (the newest first), its return site into the frame's rip, the
+# entry dropped; rax the caller's seed and rdx the blob offset, rax 0
+# when no entry matches.
+	.globl tramp_resume
+tramp_resume:
+	movq UC_GREGS + 8 * G_RSP(%rdi), %r8
+	movq tr_next(%rip), %rcx
+	movl $TR_MAX, %r9d
+1:	decq %rcx
+	andq $TR_MAX - 1, %rcx
+	movq %rcx, %rax
+	imulq $TR_BYTES, %rax, %rax
+	leaq tr_tab(%rip), %rdx
+	addq %rdx, %rax
+	cmpq TR_KEY(%rax), %r8
+	je 2f
+	decl %r9d
+	jnz 1b
+	xorl %eax, %eax
+	ret
+2:	movq $0, TR_KEY(%rax)
+	movq TR_RET(%rax), %rdx
+	movq %rdx, UC_GREGS + 8 * G_RIP(%rdi)
+	movq TR_OFF(%rax), %rdx
+	movq TR_SEED(%rax), %rax
+	ret
+
+# str_has(s rdi, part rsi): eax 1 when part occurs in s.
+str_has:
+1:	cmpb $0, (%rdi)
+	je 8f
+	xorl %ecx, %ecx
+2:	movb (%rsi,%rcx), %al
+	testb %al, %al
+	je 7f
+	cmpb (%rdi,%rcx), %al
+	jne 3f
+	incq %rcx
+	jmp 2b
+3:	incq %rdi
+	jmp 1b
+7:	movl $1, %eax
+	ret
+8:	xorl %eax, %eax
 	ret

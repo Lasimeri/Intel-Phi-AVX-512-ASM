@@ -206,3 +206,23 @@ caller in another object. `PHI512_PROMOTE=0` turns it off. Gate:
 `avx512-region-test` kernel8 (a plain integer caller of an AVX-512
 function, three calls): 100 callee regions and 5 caller regions against
 300 and 0 without, same result.
+
+## Staying on the card across plain code (2026-10-14)
+
+- Continuation: a region that ends returning (`X_RET`) into a function
+  with an automatic blob (`blob_seed_at`) goes on there at once:
+  `region_run` returns 2 with `next_seed`/`next_entry`, and sigill.S
+  calls it again in the same handler.
+- Trampoline: a region that ends calling plain code (`X_CALL`, a callee
+  the card's table does not have), from a caller with a blob in an
+  object whose path holds "libggml", has the call made by the host
+  with `phi512_tramp` (a `ud2` in the preload) as the return address
+  (`tramp_setup`, a 1024-entry ring keyed by the rsp after the return).
+  The callee's return faults on the trap; `tramp_resume` puts the
+  return site back in the frame and the caller's blob goes on from
+  there. Restricted to ggml's libraries because a C++ exception could
+  not unwind through the trap; `PHI512_TRAMP_ANY=1` lifts it for tests.
+- `PHI512_CONT=0` turns both off. Gate kernel8 with `PHI512_TRAMP_ANY=1`:
+  right results, 387 regions against 120 with both off (the caller now
+  goes back to the card after each plain call instead of finishing on
+  the host).
