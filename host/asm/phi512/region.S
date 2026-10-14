@@ -430,6 +430,10 @@ region_run:
 	cmpl $X_RET, 16(%rsp)
 	jne 76f
 	movq UC_GREGS + 8 * G_RIP(%r12), %rdi	# returned into a function with a blob: go on there on the card
+	call cont_obj_ok			# (in the compute library only)
+	testl %eax, %eax
+	jz 79f
+	movq UC_GREGS + 8 * G_RIP(%r12), %rdi
 	call blob_seed_at
 	testq %rax, %rax
 	jz 79f
@@ -2507,7 +2511,7 @@ tr_tab:		.skip TR_MAX * TR_BYTES
 	.balign 8
 tr_dec:		.skip 96			# IN_BYTES (x86dec.inc): x86_decode's out
 	.section .rodata
-s_libggml:	.asciz "libggml"
+s_libggml:	.asciz "libggml-cpu"		# the compute library: in libggml-base (the GGUF reader, tensor creation) every plain call a round trip made the load 20x slower (rs7)
 	.text
 	.globl phi512_tramp
 phi512_tramp:
@@ -2670,6 +2674,23 @@ str_has:
 3:	incq %rdi
 	jmp 1b
 7:	movl $1, %eax
+	ret
+8:	xorl %eax, %eax
+	ret
+
+# cont_obj_ok(address rdi): eax 1 when the address lies in an object
+# whose path holds "libggml-cpu" (or PHI512_TRAMP_ANY=1): continuation and
+# the trampoline pay off in the compute loops, not in the load's glue.
+cont_obj_ok:
+	cmpq $0, tramp_any(%rip)
+	jne 1f
+	call obj_at
+	testq %rax, %rax
+	jz 8f
+	leaq OBJ_PATH(%rax), %rdi
+	leaq s_libggml(%rip), %rsi
+	jmp str_has
+1:	movl $1, %eax
 	ret
 8:	xorl %eax, %eax
 	ret

@@ -226,3 +226,9 @@ function, three calls): 100 callee regions and 5 caller regions against
   right results, 387 regions against 120 with both off (the caller now
   goes back to the card after each plain call instead of finishing on
   the host).
+- Both only in objects whose path holds "libggml-cpu" (`cont_obj_ok`, the
+  trampoline's path test): with every "libggml" object, llama-server's
+  load went 20x slower (rs7: `gguf_init_from_reader` 4,835 regions every
+  5 s, each `fread` a round trip; still parsing the GGUF at 90 s against
+  3.9 s). Card round trips pay off in the compute loops; glue with many
+  plain calls stays on the host.
