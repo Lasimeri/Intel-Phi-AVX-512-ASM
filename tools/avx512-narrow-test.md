@@ -110,3 +110,12 @@ out unordered and llama-bench's prompt pass picked the wrong experts
 (lb5, the per-op compare against the AVX2 build: ffn_moe_topk-0 the
 first tensor to differ). The flags are composed in the scratch slot
 now. With the old library the three checks fail; with the fix 92 of 92.
+
+`vextractps $1` to memory and `$3` to a register (2026-10-14): no
+recipe, so the host ran it after each round trip; libm's `sincosf`
+stores its cosine with it, so every call from a region (ggml's rope
+cache, once libm was translated in-card) went back to the host: about
+1,300 host round trips in llama-bench's first minutes. It shares
+`xl_pextr` with `vpextrd` now. These two checks pass either way (the
+host runs the instruction right); the round trips show in the progress
+line's host exits.

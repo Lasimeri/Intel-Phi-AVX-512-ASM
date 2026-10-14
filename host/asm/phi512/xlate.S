@@ -179,6 +179,7 @@ xl_forms:
 	FORM MN_Vpinsrd, xl_pinsr, 0, 0
 	FORM MN_Vpextrq, xl_pextr, 1, 0
 	FORM MN_Vpextrd, xl_pextr, 0, 0
+	FORM MN_Vextractps, xl_pextr, 0, 0	# the same move (a float lane to r/m32): libm's sincosf stores the cosine with it
 	# a 16-byte block or a 32-byte half inserted
 	FORM MN_Vinserti32x4, xl_insert, 0, 0
 	FORM MN_Vinsertf32x4, xl_insert, 0, 0

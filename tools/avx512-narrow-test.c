@@ -231,6 +231,16 @@ int main(void)
             check_u64(names[t], got & 0x45, want[t]);
         }
     }
+    /* vextractps $1 to memory and $3 to a register (2026-10-14: no recipe,
+     * so every sincosf call from a region ran it on the host: llama-bench's
+     * rope cache made ~1,300 host round trips in the first minutes) */
+    {
+        uint32_t m = 0x55555555u;
+        uint64_t g = 0;
+        asm volatile("vmovups %2, %%zmm16\n\tvmovdqu %2, %%xmm1\n\tvextractps $1, %%xmm1, %0\n\tvextractps $3, %%xmm1, %%eax\n\tmov %%rax, %1" : "=m"(m), "=m"(g) : "m"(c) : "rax", "xmm1", "xmm16", "memory");
+        check_u64("vextractps $1 to memory", m, c.u[1]);
+        check_u64("vextractps $3 to eax", g, c.u[3]);
+    }
 
     /* 9. float16: vcvtph2ps from unaligned memory and from a register; vcvtps2ph */
     {

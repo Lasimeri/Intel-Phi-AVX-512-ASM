@@ -994,7 +994,8 @@ wu_refresh_unit:
 	cmpq $0, WU_FHI(%rbx)
 	jne 11f
 	jmp 9f
-11:	movq %r12, %rdi
+11:	lock incq stat_full_reads(%rip)		# (the progress line: units read whole a region)
+	movq %r12, %rdi
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call copy_mapped
@@ -2019,6 +2020,10 @@ s_hb7:	.asciz " write-back line(s), "
 s_hb8:	.asciz " chunk fill(s) ("
 s_hb9:	.asciz " read-only), "
 s_hb10:	.asciz " eviction(s)"
+s_hbu1:	.asciz "; units "
+s_hbu2:	.asciz " ("
+s_hbu3:	.asciz " untracked), read whole a region "
+s_hbu4:	.asciz ", failed run scans "
 s_hb20:	.asciz "; last region in "
 s_hb11:	.asciz "; most regions: "
 s_hb12:	.asciz "; exits ret "
@@ -2109,6 +2114,40 @@ heartbeat:
 	call w_dec
 	leaq s_hb10(%rip), %rsi
 	call w_str
+	leaq s_hbu1(%rip), %rsi
+	call w_str
+	movq wu_n(%rip), %rdi
+	call w_dec
+	leaq s_hbu2(%rip), %rsi
+	call w_str
+	xorl %edi, %edi				# untracked units
+	leaq wu_tab(%rip), %rax
+	movq wu_n(%rip), %rcx
+71:	testq %rcx, %rcx
+	jz 72f
+	cmpb $0, WU_TRK(%rax)
+	jne 73f
+	incq %rdi
+73:	addq $WU_BYTES, %rax
+	decq %rcx
+	jmp 71b
+72:	call w_dec
+	leaq s_hbu3(%rip), %rsi
+	call w_str
+	movq stat_full_reads(%rip), %rax
+	movq %rax, %rcx
+	subq hb_full(%rip), %rax
+	movq %rcx, hb_full(%rip)
+	xorl %edx, %edx
+	testq %r14, %r14
+	jz 74f
+	divq %r14
+74:	movq %rax, %rdi
+	call w_dec
+	leaq s_hbu4(%rip), %rsi
+	call w_str
+	movq stat_dt_runfail(%rip), %rdi
+	call w_dec
 	leaq s_hb12(%rip), %rsi
 	call w_str
 	movq stat_exit + 8 * X_RET(%rip), %rdi
@@ -3088,6 +3127,10 @@ dt_reg:		.skip 32
 dt_arg:		.skip 96
 dt_vec:		.skip 512 * 24		# DT_VEC page regions (dt_scan_all)
 stat_dt_skip:	.skip 8			# units the refresh did not read
+	.globl stat_full_reads, stat_dt_runfail
+stat_full_reads:	.skip 8		# units the refresh read whole (untracked, written or forced)
+stat_dt_runfail:	.skip 8		# runs whose scan failed (each unit then scanned alone)
+hb_full:	.skip 8
 	.section .rodata
 s_pagemap:	.asciz "/proc/self/pagemap"
 s_dt_on:	.asciz "phi512: dirty tracking of the writable units on (userfaultfd WP async, PAGEMAP_SCAN)"
@@ -3324,14 +3367,25 @@ dt_scan_all:
 	jae 8f
 	movq %rcx, 16(%rsp)
 	jmp 5b
-80:	movq %r12, %r14				# the scan failed: the run untracked, all dirty
+80:	incq stat_dt_runfail(%rip)		# the run's scan failed: each unit scanned alone (a run can cross a part the
+	movq %r12, %r14				# scan refuses); only a unit whose own scan fails is untracked (all dirty)
 81:	cmpq %r13, %r14
 	jae 8f
 	movq %r14, %rdi
 	call wu_by_rank
-	movb $0, WU_TRK(%rax)
-	movw $0xffff, WU_DIRTY(%rax)
-	incq %r14
+	pushq %rax
+	pushq %rax
+	movq %rax, %rdi
+	call dt_scan
+	popq %rdi
+	popq %rdi
+	testl %eax, %eax
+	js 82f
+	movw %ax, WU_DIRTY(%rdi)
+	jmp 83f
+82:	movb $0, WU_TRK(%rdi)
+	movw $0xffff, WU_DIRTY(%rdi)
+83:	incq %r14
 	jmp 81b
 8:	movq %r13, %r12				# the next run
 	jmp 1b
