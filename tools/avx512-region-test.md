@@ -55,3 +55,9 @@ twice.
   inside a callee the card entered). With in-card calls kernel6's work
   is 6 region posts (kernel6 3, dot6 1, scale6 2) against 38 with
   `PHI512_INCALL=0` (19, 17, 2), same results.
+- kernel8: a plain integer caller of an AVX-512 function called three
+  times (with the AVX-512 callee) and three times (with the scalar
+  reference): after 64 callee regions the caller is promoted, and its
+  later calls run on the card from the entry: 100 `isum8` regions and 5
+  `caller8` regions against 300 and 0 with `PHI512_PROMOTE=0`, the same
+  sum (1440).

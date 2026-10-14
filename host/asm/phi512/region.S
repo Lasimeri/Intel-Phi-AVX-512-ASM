@@ -416,7 +416,14 @@ region_run:
 	movq $1, shadow_valid(%rip)
 	incq stat_regions(%rip)
 	incq SD_NREG(%r13)
-	call now_ns
+	cmpl $X_RET, 16(%rsp)			# a busy function returning into a plain one: run that one on the card too
+	jne 78f
+	cmpq $0, promote_off(%rip)
+	jne 78f
+	movq %r13, %rdi
+	movq UC_GREGS + 8 * G_RIP(%r12), %rsi	# the return address the host goes on at
+	call promote_check
+78:	call now_ns
 	subq 8(%rsp), %rax
 	addq %rax, stat_region_ns(%rip)
 	movq %rax, %r15
@@ -2276,6 +2283,171 @@ rg_report_exit:
 	popq %r15
 	popq %r14
 	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# Caller promotion (2026-10-14). A function the card runs (F) whose caller
+# is plain code runs as one region per call: llama.cpp's expert path calls
+# ggml_vec_dot_bf16 once a row from ggml_compute_forward_mul_mat_id's
+# plain loop (~170 regions/s, about 840 every 5 s on 2026-10-14), and an
+# in-card call cannot help while the caller runs on the host. When F has
+# PROMOTE_AT regions that ended with a return, the function G its return
+# address lies in, when it is in the same object (obj_at) and is not F, is
+# translated, loaded on every card (seed_prepare) and its entry patched
+# with ud2 (0F 0B): G's next call faults, seed_of finds G's seed by the
+# address and G runs on the card from its entry, calling F in-card. G's
+# own returns climb the same way, up to the first caller in another
+# object (ggml_graph_compute_thread, called from libgomp). Each F
+# promotes once; PHI512_PROMOTE=0 turns it off.
+	.set PROMOTE_AT, 64
+	.set SYS_mprotect_n, 10
+	.set PROT_RX, 5
+	.set PROT_RWX, 7
+	.bss
+	.balign 8
+	.globl promote_off, stat_promoted
+promote_off:	.skip 8			# PHI512_PROMOTE=0 (main.S)
+stat_promoted:	.skip 8
+prom_done:	.skip 2048		# per seed index: its caller tried
+prom_patched:	.skip 2048		# per seed index: its entry patched
+	.section .rodata
+s_pm1:	.asciz "phi512: promoted "
+s_pm2:	.asciz " (the caller of "
+s_pm3:	.asciz "): its calls run on the card from its entry"
+	.text
+# seed_index_of(seed rdi): its index in rax.
+seed_index_of:
+	movq %rdi, %rax
+	leaq seeds(%rip), %rcx
+	subq %rcx, %rax
+	xorl %edx, %edx
+	movl $SD_BYTES, %ecx
+	divq %rcx
+	ret
+
+# promote_check(F rdi, return address rsi)
+promote_check:
+	cmpq $PROMOTE_AT, SD_NREG(%rdi)
+	jb 99f
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	call seed_index_of
+	cmpq $2048, %rax
+	jae 9f
+	leaq prom_done(%rip), %rcx
+	cmpb $0, (%rcx,%rax)
+	jne 9f
+	movb $1, (%rcx,%rax)			# once per F
+	movq SD_ADDR(%rbx), %rdi
+	call obj_at
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %r13				# F's object
+	movq %r12, %rdi
+	call obj_at
+	cmpq %r13, %rax
+	jne 9f					# another object: the climb stops
+	# G: a seed already holding the address, else a new dynamic one
+	leaq seeds(%rip), %r14
+	xorl %r15d, %r15d
+1:	cmpq nseeds(%rip), %r15
+	jae 3f
+	movq SD_ADDR(%r14), %rax
+	testq %rax, %rax
+	jz 2f
+	cmpq %rax, %r12
+	jb 2f
+	addq SD_LEN(%r14), %rax
+	cmpq %rax, %r12
+	jb 4f
+2:	addq $SD_BYTES, %r14
+	incq %r15
+	jmp 1b
+3:	movq %r12, %rdi
+	call seed_dyn_add
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %r14
+4:	cmpq %rbx, %r14
+	je 9f
+	movq %r14, %rdi
+	call seed_index_of
+	cmpq $2048, %rax
+	jae 9f
+	movq %rax, %r15
+	leaq prom_patched(%rip), %rcx
+	cmpb $0, (%rcx,%r15)
+	jne 9f
+	movb $1, (%rcx,%r15)			# tried once, whatever comes of it
+	movq %r14, %rdi
+	movq SD_ADDR(%r14), %rsi
+	call seed_prepare			# translated, on every card; the entry's offset
+	cmpq $-1, %rax
+	je 9f
+	cmpq $0, SD_REFUSED(%r14)
+	jne 9f
+	movq SD_ADDR(%r14), %rdi
+	call patch_entry
+	testl %eax, %eax
+	jnz 9f
+	incq stat_promoted(%rip)
+	call l_begin
+	leaq s_pm1(%rip), %rsi
+	call w_str
+	movq SD_NAME(%r14), %rsi
+	call w_str
+	leaq s_pm2(%rip), %rsi
+	call w_str
+	movq SD_NAME(%rbx), %rsi
+	call w_str
+	leaq s_pm3(%rip), %rsi
+	call w_str
+	movl $2, %edi
+	call l_end
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+99:	ret
+
+# patch_entry(address rdi): ud2 (0F 0B) written over the first two bytes
+# of a function, its page(s) made writable for the store and executable
+# again; eax 0, or 1 when mprotect refused. The function's blob was built
+# from the bytes before (seed_prepare first).
+patch_entry:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %rbx
+	movq %rbx, %r12
+	andq $-4096, %r12			# the page
+	leaq 2 + 4095(%rbx), %r13
+	andq $-4096, %r13
+	subq %r12, %r13				# one page or two
+	movq %r12, %rdi
+	movq %r13, %rsi
+	movl $PROT_RWX, %edx
+	movl $SYS_mprotect_n, %eax
+	syscall
+	testq %rax, %rax
+	jnz 8f
+	movw $0x0b0f, (%rbx)
+	movq %r12, %rdi
+	movq %r13, %rsi
+	movl $PROT_RX, %edx
+	movl $SYS_mprotect_n, %eax
+	syscall
+	xorl %eax, %eax
+	jmp 9f
+8:	movl $1, %eax
+9:	popq %r13
 	popq %r12
 	popq %rbx
 	ret

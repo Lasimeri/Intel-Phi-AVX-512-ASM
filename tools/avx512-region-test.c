@@ -286,6 +286,38 @@ static float kernel6_ref(const float *x, float *y, int reps, dot_t f)
     return acc + dot6_ref(y, x);
 }
 
+
+/* kernel8: caller promotion (2026-10-14): a plain caller (integer code
+ * only, no vector instructions) calls an AVX-512 function in a loop, so
+ * every call is a region of its own until the preload promotes the
+ * caller (after PROMOTE_AT regions of the callee): the caller's entry
+ * becomes ud2, its next call runs on the card from the entry, with the
+ * callee called in-card. Three calls of the caller: the second and the
+ * third run whole on the card. Integer sums: exact. */
+__attribute__((noinline))
+static int isum8(const int *a)
+{
+    int s = 0;
+    for (int i = 0; i < 64; i++) s += a[i] * 3;
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static int isum8_ref(const int *a)
+{
+    int s = 0;
+    for (int i = 0; i < 64; i++) s += a[i] * 3;
+    return s;
+}
+
+__attribute__((noinline, target("no-avx512f,no-avx2,no-avx"), optimize("no-tree-vectorize")))
+static long caller8(const int *a, int n, int (*f)(const int *))
+{
+    long t = 0;
+    for (int i = 0; i < n; i++) t += (long)(f(a + (i & 63)) ^ i);
+    return t;
+}
+
 /* main itself has no AVX-512 code: the inputs come from a scalar helper
  * (gcc would vectorise the loop in main with forms the kernels never
  * use). */
@@ -342,6 +374,12 @@ int main(void)
     float r6 = kernel6(x, y6, 8, dot6), w6 = kernel6_ref(x, y6r, 8, dot6_ref);
     if (r6 != w6 || memcmp(y6, y6r, sizeof y6)) { printf("FAIL kernel6: got %g want %g, arrays %s\n", r6, w6, memcmp(y6, y6r, sizeof y6) ? "differ" : "equal"); fails++; }
     else printf("ok   kernel6 (calls between AVX-512 functions, one with an exit inside: %g)\n", r6);
+    static int a8[128];
+    for (int i = 0; i < 128; i++) a8[i] = (i * 7) % 13 - 6;
+    long r8 = 0, w8 = 0;
+    for (int c = 0; c < 3; c++) { r8 += caller8(a8, 100, isum8); w8 += caller8(a8, 100, isum8_ref); }
+    if (r8 != w8) { printf("FAIL kernel8: got %ld want %ld\n", r8, w8); fails++; }
+    else printf("ok   kernel8 (a plain caller of an AVX-512 function, promoted: %ld)\n", r8);
     printf("%s\n", fails ? "FAIL" : "PASS: every region came back right");
     return fails != 0;
 }

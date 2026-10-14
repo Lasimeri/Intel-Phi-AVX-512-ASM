@@ -21,6 +21,7 @@ s_env_handblobs: .asciz "PHI512_HANDBLOBS"
 s_env_heapcheck: .asciz "PHI512_HEAPCHECK"
 s_env_incall:	.asciz "PHI512_INCALL"
 s_env_cardwb:	.asciz "PHI512_CARDWB"
+s_env_promote:	.asciz "PHI512_PROMOTE"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -87,6 +88,13 @@ phi512_init:
 	testq %rax, %rax
 	sete %cl
 	movq %rcx, cardwb_off(%rip)
+	leaq s_env_promote(%rip), %rdi		# PHI512_PROMOTE=0: no caller promotion (region.S promote_check)
+	movl $1, %esi
+	call env_u64
+	xorl %ecx, %ecx
+	testq %rax, %rax
+	sete %cl
+	movq %rcx, promote_off(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f

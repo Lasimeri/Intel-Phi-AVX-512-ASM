@@ -189,3 +189,20 @@ seed's blob on card 0), and the region's seed becomes that blob's.
 card 0 does not hold with it, so their fills go in the same round and the
 region does not leave the card for each (an exit and a re-post saved per
 chunk). `stat_ro_ahead` counts them.
+
+## Caller promotion (2026-10-14)
+
+A card function F called from plain host code runs as one region per call
+(llama.cpp's expert path: `ggml_vec_dot_bf16` once a row from a plain
+loop, ~840 regions every 5 s). `promote_check`, after a region of F that
+ended with a return: once F has `PROMOTE_AT` (64) regions, the function G
+holding the return address, in the same object (`obj_at`) and not F, is
+translated and loaded on every card (`seed_prepare`, a dynamic seed when
+new) and its entry patched with `ud2` (`patch_entry`: mprotect RWX, `0F 0B`,
+back to RX). G's next call faults; `seed_of` finds G's seed by the
+address and G runs on the card from its entry, F in-card. Each F promotes
+its caller once; G's returns climb on the same rule up to the first
+caller in another object. `PHI512_PROMOTE=0` turns it off. Gate:
+`avx512-region-test` kernel8 (a plain integer caller of an AVX-512
+function, three calls): 100 callee regions and 5 caller regions against
+300 and 0 without, same result.
