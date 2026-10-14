@@ -163,6 +163,11 @@ phi512_init:
 	xorl %edx, %edx
 	movl $SIGSET_BYTES, %r10d
 	SYS SYS_rt_sigaction
+	movl $5, %edi				# SIGTRAP: the single step after an instruction the host ran (region.S)
+	leaq sa(%rip), %rsi
+	xorl %edx, %edx
+	movl $SIGSET_BYTES, %r10d
+	SYS SYS_rt_sigaction
 	cmpq $0, verbose(%rip)
 	je 9f
 	call l_begin

@@ -256,3 +256,20 @@ the graph thread's regions fell from ~1,410 to 7 every 5 s). The
 progress line now counts the region exits by kind (returns, calls, host
 instructions, syscalls, faults, jumps), the callees translated and the
 trampolines.
+
+## One step back to the card after a host-run instruction (2026-10-14)
+
+An instruction the card cannot run (a lazy site: a locked atomic, a form
+without a recipe) is run by the host, and the function then went on
+natively: tinyBLAS's `gemm` takes its work chunks through
+`ggml_threadpool_chunk_add` (a `lock xadd`), and after each the host ran
+`gemm` and called `gemm_bloc` from there, one region per block (rs16's
+exit histogram: "host in ggml_threadpool_chunk_add +2" ~700 every 5 s,
+"ret in gemm +1e2" ~700). Now, in the compute library, the host takes
+the instruction with the trap flag set; the SIGTRAP after it (the same
+handler, installed for SIGTRAP too) clears the flag and posts the
+function's blob at the next instruction (`blob_seed_at`), or lets the
+host go on when there is none. `PHI512_TRAMP_ANY=1` applies it to the
+test programs as well. The progress line's exit histogram (`ex_note`,
+`ex_print`: the three most frequent "kind in function +offset" of the
+interval) is how these were found.

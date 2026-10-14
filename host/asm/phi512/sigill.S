@@ -80,6 +80,7 @@ phi512_sigill:
 	pushq %r14
 	pushq %r15
 	subq $80, %rsp
+	movl %edi, 72(%rsp)			# the signal (SIGTRAP: the single step after a host-run instruction)
 	movq %rdx, %rbx				# uc
 	# one thread at a time (the translation, the region path, the units,
 	# the refresh list and the cards' slots are the process's): a
@@ -100,7 +101,18 @@ phi512_sigill:
 	call now_ns
 	movq %rax, 0(%rsp)
 	movq UC_GREGS + 8 * G_RIP(%rbx), %r12	# rip
-	leaq phi512_tramp(%rip), %rax		# a plain callee returned through the trap (region.S tramp_setup):
+	cmpl $5, 72(%rsp)			# SIGTRAP: the host ran one instruction for a region (X_HOST, TF set):
+	jne 97f					# the card takes the function back at the next one
+	andq $~0x100, UC_GREGS + 8 * G_EFL(%rbx)
+	movq %r12, %rdi
+	call blob_seed_at
+	testq %rax, %rax
+	jz .Lout				# no blob there: on natively
+	movq %rax, %r13
+	movq %rdx, %rax
+	incq stat_sstep(%rip)
+	jmp 95f
+97:	leaq phi512_tramp(%rip), %rax		# a plain callee returned through the trap (region.S tramp_setup):
 	cmpq %rax, %r12				# its caller goes on on the card at the return site
 	jne 96f
 	movq %rbx, %rdi

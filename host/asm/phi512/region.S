@@ -257,6 +257,13 @@ region_run:
 31:
 	movq SLOT_REPLY + SR_EXIT_RIP(%rcx), %rax	# kept before any other request reuses the reply
 	movq %rax, 40(%rsp)
+	pushq %rcx
+	pushq %rcx
+	movl 32(%rsp), %edi			# (16(%rsp) under the two pushes) the kind
+	movq %rax, %rsi
+	call ex_note				# the exits by kind and address (the progress line)
+	popq %rcx
+	popq %rcx
 	movq SLOT_REPLY + SR_EXIT_AUX(%rcx), %r15
 	movq %r15, exit_aux(%rip)		# (the callee of an X_CALL: tramp_setup)
 	movl SLOT_REPLY + SR_SIGINFO(%rcx), %eax
@@ -450,7 +457,7 @@ region_run:
 	incq stat_cont(%rip)
 	jmp 79f
 76:	cmpl $X_CALL, 16(%rsp)
-	jne 79f
+	jne 75f
 	movq exit_aux(%rip), %rdi		# a compute-library callee the card has no blob for: translated and loaded now
 	call callee_promote
 	movq exit_aux(%rip), %rdi		# a PLT stub that now resolves to a function the card holds: an alias on the cards
@@ -458,6 +465,14 @@ region_run:
 	movq %r12, %rdi				# a call of plain code: it runs on the host, its return comes back here
 	movq exit_aux(%rip), %rsi
 	call tramp_setup
+	jmp 79f
+75:	cmpl $X_HOST, 16(%rsp)			# (from 76 when not X_CALL)
+	jne 79f
+	movq UC_GREGS + 8 * G_RIP(%r12), %rdi	# an instruction the host runs: one step, then back to the card (SIGTRAP)
+	call cont_obj_ok
+	testl %eax, %eax
+	jz 79f
+	orq $0x100, UC_GREGS + 8 * G_EFL(%r12)
 79:	call now_ns
 	subq 8(%rsp), %rax
 	addq %rax, stat_region_ns(%rip)
@@ -2109,7 +2124,8 @@ heartbeat:
 	movq %rax, SD_NREG0(%r15)
 	decl %r14d
 	jnz 71b
-76:	xorl %ecx, %ecx
+76:	call ex_print
+	xorl %ecx, %ecx
 	leaq seeds(%rip), %rdx
 77:	cmpq nseeds(%rip), %rcx
 	jae 1f
@@ -2592,6 +2608,8 @@ next_seed:	.skip 8
 next_entry:	.skip 8
 stat_cont:	.skip 8			# continuations after a return
 stat_tramp:	.skip 8			# plain calls run under a trap return
+	.globl stat_sstep
+stat_sstep:	.skip 8			# single steps back to the card after a host-run instruction
 tr_next:	.skip 8
 tr_tab:		.skip TR_MAX * TR_BYTES
 	.balign 8
@@ -3101,5 +3119,119 @@ callee_promote:
 	je 9f
 	incq stat_callee(%rip)
 9:	popq %r12
+	popq %rbx
+	ret
+
+# The exits by kind and address over a progress interval (2026-10-14:
+# to see which instruction or call ends the regions of the hot functions).
+# ex_note(kind edi, rip rsi) counts them in a 256-entry table; the
+# heartbeat prints the three most frequent as "kind function+offset count"
+# (ex_print) and empties it.
+	.set EX_MAX, 256
+	.bss
+	.balign 8
+ex_tab:		.skip EX_MAX * 16		# {kind << 56 | rip, count}
+	.section .rodata
+s_ex1:	.asciz "; most exits: "
+s_ex2:	.asciz " in "
+	.text
+ex_note:
+	movq %rdi, %rax
+	shlq $56, %rax
+	orq %rsi, %rax				# the key
+	movl %esi, %ecx
+	shrl $4, %ecx
+	xorl %esi, %ecx
+	andl $EX_MAX - 1, %ecx
+	leaq ex_tab(%rip), %rdx
+	movl $EX_MAX, %r8d
+1:	movq %rcx, %r9
+	shlq $4, %r9
+	cmpq (%rdx,%r9), %rax
+	je 2f
+	cmpq $0, (%rdx,%r9)
+	je 3f
+	incl %ecx
+	andl $EX_MAX - 1, %ecx
+	decl %r8d
+	jnz 1b
+	ret					# full: not counted
+3:	movq %rax, (%rdx,%r9)
+	movq $0, 8(%rdx,%r9)
+2:	incq 8(%rdx,%r9)
+	ret
+
+# ex_print: the three most frequent exits of the interval onto the line
+# being written, then the table emptied.
+ex_print:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	movl $3, %r14d
+	leaq s_ex1(%rip), %rsi
+	call w_str
+1:	leaq ex_tab(%rip), %rbx
+	xorl %ecx, %ecx
+	xorl %r12d, %r12d			# the best entry
+	xorl %r13d, %r13d			# its count
+2:	cmpl $EX_MAX, %ecx
+	jae 3f
+	movq %rcx, %rax
+	shlq $4, %rax
+	movq 8(%rbx,%rax), %rdx
+	cmpq %r13, %rdx
+	jbe 21f
+	movq %rdx, %r13
+	leaq (%rbx,%rax), %r12
+21:	incl %ecx
+	jmp 2b
+3:	testq %r12, %r12
+	jz 8f
+	cmpl $3, %r14d
+	je 31f
+	leaq s_rg5(%rip), %rsi			# ", "
+	call w_str
+31:	movq (%r12), %rdi
+	shrq $56, %rdi
+	call kind_name
+	movq %rax, %rsi
+	call w_str
+	leaq s_ex2(%rip), %rsi
+	call w_str
+	movq (%r12), %rdi
+	shlq $8, %rdi
+	shrq $8, %rdi				# the rip
+	pushq %rdi
+	pushq %rdi
+	call elf_func_at
+	popq %rdi
+	popq %rdi
+	testq %rax, %rax
+	jz 4f
+	pushq %rax
+	pushq %rdi
+	movq %rcx, %rsi
+	call w_str
+	leaq s_rg2(%rip), %rsi			# " +"
+	call w_str
+	popq %rdi
+	popq %rax
+	subq %rax, %rdi
+4:	call w_hexn
+	movb $' ', %al
+	call w_byte
+	movq %r13, %rdi
+	call w_dec
+	movq $0, 8(%r12)
+	decl %r14d
+	jnz 1b
+8:	leaq ex_tab(%rip), %rdi			# emptied
+	movl $EX_MAX * 2, %ecx
+	xorl %eax, %eax
+	rep stosq
+	popq %r14
+	popq %r13
+	popq %r12
 	popq %rbx
 	ret
