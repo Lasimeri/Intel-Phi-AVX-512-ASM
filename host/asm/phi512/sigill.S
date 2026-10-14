@@ -824,6 +824,16 @@ resident_rounds:
 8:	xorl %eax, %eax
 	jmp 10f
 9:	movq %rbx, failed_card(%rip)
+	pushq %rax
+	pushq %rax
+	movq %rbx, %rdi
+	imulq $CD_BYTES, %rdi, %rdi
+	leaq cards(%rip), %rcx
+	addq %rcx, %rdi
+	movl %eax, %esi
+	call c0_report				# what the card refused, with the pool as the host counts it
+	popq %rax
+	popq %rax
 10:	popq %r13
 	popq %r12
 	popq %rbx

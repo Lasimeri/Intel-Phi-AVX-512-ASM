@@ -44,6 +44,9 @@ stage_buf:	.skip 65536
 shadow_valid:	.skip 8
 fexec_flags:	.skip 8				# OR'd into K_FEXEC's flags by card_fexec_post
 cblob_tab:	.skip SEEDS_MAX * MAX_CARDS * 8	# the blob's card address per seed and card (card_load_seed)
+	.globl rg_card, rg_cardp
+rg_card:	.skip 8				# the card regions run on (its index; region_run, rg_card_set)
+rg_cardp:	.skip 8				# its entry in cards
 wu_tab:		.skip WU_MAX * WU_BYTES
 wu_n:		.skip 8
 wu_arena:	.skip 16
@@ -116,7 +119,8 @@ region_run:
 	movq %rdi, %r12
 	movq %rsi, %r13
 	movq %rdx, %r14
-	leaq cards(%rip), %rbx			# card 0
+	call rg_card_set			# the card regions run on (rg_card)
+	movq %rax, %rbx
 	movq $0, 0(%rsp)
 	call now_ns
 	movq %rax, 8(%rsp)
@@ -293,6 +297,8 @@ region_run:
 	call w_str
 	call seed_index
 	shlq $7, %rax
+	movq rg_card(%rip), %rdx
+	leaq (%rax,%rdx,8), %rax
 	leaq cblob_tab(%rip), %rdx
 	movq (%rdx,%rax), %rdi
 	call w_hexn
@@ -596,20 +602,39 @@ seed_index:
 	divq %rcx
 	ret
 
-# wu_find(addr rdi): the unit's entry in rax, 0 when none.
+# wu_find(addr rdi): the unit's entry in rax, 0 when none: a binary
+# search of the by-address index (wu_sorted). It was a walk of every
+# unit, called for every line written back (~2,600 units, ~7.3 million
+# lines in llama-server's first forward pass, rs20/rs21). rax, rcx and
+# rdi clobbered, as before.
 wu_find:
 	andq $-UNIT, %rdi
-	leaq wu_tab(%rip), %rax
-	movq wu_n(%rip), %rcx
-1:	testq %rcx, %rcx
-	jz 9f
+	pushq %rdx
+	pushq %rsi
+	pushq %r8
+	xorl %esi, %esi				# lo
+	movq wu_n(%rip), %rdx			# hi (past the last)
+	leaq wu_tab(%rip), %r8
+1:	cmpq %rdx, %rsi
+	jae 9f
+	leaq (%rsi,%rdx), %rcx
+	shrq $1, %rcx				# mid
+	leaq wu_sorted(%rip), %rax
+	movzwl (%rax,%rcx,2), %eax
+	imulq $WU_BYTES, %rax, %rax
+	addq %r8, %rax
 	cmpq WU_ADDR(%rax), %rdi
 	je 8f
-	addq $WU_BYTES, %rax
-	decq %rcx
+	jb 2f
+	leaq 1(%rcx), %rsi
+	jmp 1b
+2:	movq %rcx, %rdx
 	jmp 1b
 9:	xorl %eax, %eax
-8:	ret
+8:	popq %r8
+	popq %rsi
+	popq %rdx
+	ret
 
 # wu_ensure(addr rdi, lo rsi): the 64 KiB unit holding addr resident on
 # card 0 with a shadow here: a new entry (its mapped pages found, the
@@ -648,6 +673,9 @@ wu_ensure:
 	addq %rax, %rbx				# the entry
 	incq wu_n(%rip)
 	movq %r12, WU_ADDR(%rbx)
+	movq wu_n(%rip), %rdi
+	decq %rdi
+	call wu_sort_insert			# the by-address index, at once (wu_find searches it; dt_scan_all walks it)
 	movq wu_used(%rip), %rax
 	addq wu_arena(%rip), %rax
 	movq %rax, WU_SHADOW(%rbx)
@@ -680,11 +708,8 @@ wu_ensure:
 	movw $0xffff, WU_DIRTY(%rbx)
 	movq %rbx, %rdi
 	call dt_register				# its writes tracked by the kernel from now (the shadow just taken)
-	movq wu_n(%rip), %rdi
-	decq %rdi
-	call wu_sort_insert			# the by-address index (dt_scan_all scans runs of adjacent units)
-	# the need on card 0: the chunk and the unit's bit, class 1 (written back)
-	xorl %edi, %edi
+	# the need on the card regions run on: the chunk and the unit's bit, class 1 (written back)
+	movq rg_card(%rip), %rdi
 	movq %r12, %rsi
 	andq $-CHUNK, %rsi
 	movq %r12, %rdx
@@ -837,7 +862,8 @@ wu_refresh:
 	testq %rax, %rax
 	jz 10f
 	shlq $4, %rax
-	movq cards + CD_DATAP(%rip), %rcx
+	movq rg_cardp(%rip), %rcx
+	movq CD_DATAP(%rcx), %rcx
 	movq SD_REFRESH_TAB - 16 + 8(%rcx,%rax), %rax
 	movq %rax, rf_save_last(%rip)
 10:	xorl %r14d, %r14d			# the line (0 to 1023)
@@ -895,10 +921,12 @@ wu_refresh:
 	testq %rax, %rax
 	jz 11f
 	shlq $4, %rax
-	movq cards + CD_DATAP(%rip), %rcx
+	movq rg_cardp(%rip), %rcx
+	movq CD_DATAP(%rcx), %rcx
 	movq rf_save_last(%rip), %rdx
 	movq %rdx, SD_REFRESH_TAB - 16 + 8(%rcx,%rax)
-11:	leaq cards + CD_TAB(%rip), %rdi
+11:	movq rg_cardp(%rip), %rdi
+	leaq CD_TAB(%rdi), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	andq $-CHUNK, %rsi
 	call tab_find
@@ -908,7 +936,7 @@ wu_refresh:
 	andq $CHUNK - 1, %rcx
 	shrq $16, %rcx
 	btrl %ecx, RE_FILLED(%rax)
-1:	xorl %edi, %edi
+1:	movq rg_card(%rip), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	andq $-CHUNK, %rsi
 	movq WU_ADDR(%rbx), %rdx
@@ -1014,7 +1042,8 @@ wu_chg:	.skip WU_MAX * 128			# per unit, a bit per line the refresh found change
 # the 64 bytes appended. eax 0, or 1 when the table (512 ranges) or
 # the bytes (SD_REFRESH to SD_WB_TAB) are full.
 refresh_add:
-	movq cards + CD_DATAP(%rip), %rdx
+	movq rg_cardp(%rip), %rdx
+	movq CD_DATAP(%rdx), %rdx
 	movq refresh_n(%rip), %rax
 	testq %rax, %rax
 	jz 1f
@@ -1095,7 +1124,8 @@ wu_diff_pages:
 wu_writeback:
 	cmpq $0, cardwb_off(%rip)
 	jne 0f
-	movq cards + CD_SLOTP(%rip), %rax	# the card's own diff (FXF_CARDWB): its list, unless it overflowed
+	movq rg_cardp(%rip), %rax
+	movq CD_SLOTP(%rax), %rax	# the card's own diff (FXF_CARDWB): its list, unless it overflowed
 	cmpl $-1, SLOT_REPLY + SR_WB_N(%rax)
 	jne wu_writeback_card
 	incq stat_cardwb_full(%rip)
@@ -1109,19 +1139,22 @@ wu_writeback:
 	xorl %r15d, %r15d			# lines
 1:	testq %r12, %r12
 	jz 9f
-	leaq cards(%rip), %rdi
+	movq rg_cardp(%rip), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call card_push_post
-	leaq cards(%rip), %rdi
+	movq rg_cardp(%rip), %rdi
 	call card_wait
-	movq $0, cards + CD_POSTED(%rip)
+	movq rg_cardp(%rip), %rcx
+	movq $0, CD_POSTED(%rcx)
 	testl %eax, %eax
 	jnz 8f
-	movq cards + CD_PEND_UNITS(%rip), %r13	# the staging slot
+	movq rg_cardp(%rip), %r13
+	movq CD_PEND_UNITS(%r13), %r13	# the staging slot
 	shlq $21, %r13
 	addq $OFF_RESIDENT, %r13
-	addq cards + CD_BASE(%rip), %r13	# the staged bytes (the window)
+	movq rg_cardp(%rip), %rdx
+	addq CD_BASE(%rdx), %r13	# the staged bytes (the window)
 	xorl %r14d, %r14d			# page
 2:	cmpl $16, %r14d
 	jae 7f
@@ -1376,7 +1409,8 @@ wu_verify:
 	movq fill_last_slot(%rip), %r13
 	shlq $21, %r13
 	addq $OFF_RESIDENT, %r13
-	addq cards + CD_BASE(%rip), %r13
+	movq rg_cardp(%rip), %rdx
+	addq CD_BASE(%rdx), %r13
 	addq %rax, %r13				# the staged bytes of this unit
 	movq WU_SHADOW(%rbx), %rdx
 	movq WU_LO(%rbx), %rcx
@@ -1426,19 +1460,22 @@ wu_verify:
 	movq wu_n(%rip), %r12
 1:	testq %r12, %r12
 	jz 8f
-	leaq cards(%rip), %rdi
+	movq rg_cardp(%rip), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call card_push_post
-	leaq cards(%rip), %rdi
+	movq rg_cardp(%rip), %rdi
 	call card_wait
-	movq $0, cards + CD_POSTED(%rip)
+	movq rg_cardp(%rip), %rcx
+	movq $0, CD_POSTED(%rcx)
 	testl %eax, %eax
 	jnz 8f
-	movq cards + CD_PEND_UNITS(%rip), %r13
+	movq rg_cardp(%rip), %r13
+	movq CD_PEND_UNITS(%r13), %r13
 	shlq $21, %r13
 	addq $OFF_RESIDENT, %r13
-	addq cards + CD_BASE(%rip), %r13	# the staged bytes
+	movq rg_cardp(%rip), %rdx
+	addq CD_BASE(%rdx), %r13	# the staged bytes
 	xorl %r15d, %r15d			# lines
 	movq $-1, %r14				# the first offset
 	xorl %r8d, %r8d				# page
@@ -2184,7 +2221,7 @@ ro_need:
 	call chunk_immutable
 	testl %eax, %eax
 	jz 9f
-	leaq cards(%rip), %rdi			# card 0's table: a chunk held as units stays units
+	movq rg_cardp(%rip), %rdi		# the card's table: a chunk held as units stays units
 	leaq CD_TAB(%rdi), %rdi
 	movq %rbx, %rsi
 	call tab_find
@@ -2192,7 +2229,7 @@ ro_need:
 	jz 1f
 	cmpl $0, RE_CLASS(%rax)
 	jne 8f
-1:	xorl %edi, %edi
+1:	movq rg_card(%rip), %rdi
 	movq %rbx, %rsi
 	movl $-1, %edx				# every unit of the chunk
 	xorl %ecx, %ecx				# class 0
@@ -2219,13 +2256,13 @@ ro_need:
 	call chunk_immutable
 	testl %eax, %eax
 	jz 5f					# past the mapping
-	leaq cards(%rip), %rdi
+	movq rg_cardp(%rip), %rdi
 	leaq CD_TAB(%rdi), %rdi
 	movq %r13, %rsi
 	call tab_find
 	testq %rax, %rax
 	jnz 3f					# held already
-	xorl %edi, %edi
+	movq rg_card(%rip), %rdi
 	movq %r13, %rsi
 	movl $-1, %edx
 	xorl %ecx, %ecx
@@ -2254,7 +2291,9 @@ blob_at:
 1:	cmpq nseeds(%rip), %rcx
 	jae 8f
 	movq %rcx, %rax
-	shlq $7, %rax				# MAX_CARDS * 8 bytes a seed; card 0's first
+	shlq $7, %rax				# MAX_CARDS * 8 bytes a seed
+	movq rg_card(%rip), %rdx
+	leaq (%rax,%rdx,8), %rax		# the card regions run on
 	leaq cblob_tab(%rip), %rdx
 	movq (%rdx,%rax), %rdx
 	testq %rdx, %rdx
@@ -2276,6 +2315,17 @@ blob_at:
 2:	incq %rcx
 	jmp 1b
 8:	xorl %eax, %eax
+	ret
+
+# rg_card_set: rax the entry in cards of the card regions run on
+# (rg_card), kept in rg_cardp too. Card 0 until a region moves (the
+# four-card pool, 2026-10-14).
+rg_card_set:
+	movq rg_card(%rip), %rax
+	imulq $CD_BYTES, %rax, %rax
+	leaq cards(%rip), %rcx
+	addq %rcx, %rax
+	movq %rax, rg_cardp(%rip)
 	ret
 
 # wu_writeback_card: the write-back from the card's own diff (card
@@ -2301,9 +2351,11 @@ wu_writeback_card:
 	pushq %r14
 	pushq %r15
 	incq stat_cardwb(%rip)
-	movq cards + CD_SLOTP(%rip), %rax
+	movq rg_cardp(%rip), %rax
+	movq CD_SLOTP(%rax), %rax
 	movl SLOT_REPLY + SR_WB_N(%rax), %r12d	# ranges left
-	movq cards + CD_DATAP(%rip), %r13
+	movq rg_cardp(%rip), %r13
+	movq CD_DATAP(%r13), %r13
 	leaq SD_WB(%r13), %r14			# the bytes
 	addq $SD_WB_TAB, %r13			# the table
 	xorl %r15d, %r15d			# lines written

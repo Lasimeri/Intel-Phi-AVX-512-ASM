@@ -864,6 +864,78 @@ c0_victim:
 	popq %rbx
 	ret
 
+# c0_report(card rdi, status esi): a K_RESIDENT the card refused, said
+# with the host's view of the card's pool (2026-10-14: lb1, llama-bench
+# pp4, died on an E_ALLOC with nothing to say why): the chunk, its class,
+# the victim the request named, the class-0 chunks pinned, the ring's
+# fill, the pool's pages and the evictions so far.
+	.section .rodata
+s_c0r1:	.asciz "phi512: card "
+s_c0r2:	.asciz " refused K_RESIDENT of chunk "
+s_c0r3:	.asciz " class "
+s_c0r4:	.asciz ", status "
+s_c0r5:	.asciz ", victim named "
+s_c0r6:	.asciz "; class-0 pinned "
+s_c0r7:	.asciz ", ring "
+s_c0r8:	.asciz ", pool pages "
+s_c0r9:	.asciz ", evictions "
+	.text
+	.globl c0_report
+c0_report:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq %rdi, %rbx
+	movl %esi, %r12d
+	movq CD_INDEX(%rbx), %r13
+	call l_begin
+	leaq s_c0r1(%rip), %rsi
+	call w_str
+	movq %r13, %rdi
+	call w_dec
+	leaq s_c0r2(%rip), %rsi
+	call w_str
+	movq CD_PEND_CHUNK(%rbx), %rdi
+	call w_hexn
+	leaq s_c0r3(%rip), %rsi
+	call w_str
+	movl CD_PEND_CLASS(%rbx), %edi
+	call w_dec
+	leaq s_c0r4(%rip), %rsi
+	call w_str
+	movslq %r12d, %rdi
+	call w_sdec
+	leaq s_c0r5(%rip), %rsi
+	call w_str
+	movq CD_SLOTP(%rbx), %rax
+	movq SL_VICTIM(%rax), %rdi
+	call w_hexn
+	leaq s_c0r6(%rip), %rsi
+	call w_str
+	leaq c0_n(%rip), %rax
+	movq (%rax,%r13,8), %rdi
+	call w_dec
+	leaq s_c0r7(%rip), %rsi
+	call w_str
+	leaq c0_rn(%rip), %rax
+	movq (%rax,%r13,8), %rdi
+	call w_dec
+	leaq s_c0r8(%rip), %rsi
+	call w_str
+	leaq c0_pool(%rip), %rax
+	movq (%rax,%r13,8), %rdi
+	call w_dec
+	leaq s_c0r9(%rip), %rsi
+	call w_str
+	movq stat_evictions(%rip), %rdi
+	call w_dec
+	movl $2, %edi
+	call l_end
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
 # card_alias(card rdi, seed index rsi, key rdx, entry offset rcx): K_LOAD
 # with no bytes and the key in fill_off: the card's in-card call table
 # gets key -> the seed's loaded blob + offset (a PLT stub that resolved to
