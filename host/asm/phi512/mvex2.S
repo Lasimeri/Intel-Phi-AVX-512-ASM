@@ -122,6 +122,7 @@ em_unaligned:
 	.set BO_OFF, MV_BYTES + 24
 	.set BO_DIR, MV_BYTES + 28		# 0: memory to the slot; 1: the slot to memory
 	.set BO_STEP, MV_BYTES + 32
+	.set BO_PACK, MV_BYTES + 36		# the store packs (EM_PACK)
 	.set BO_FRAME, MV_BYTES + 48
 	.globl em_bounce
 em_bounce:
@@ -138,6 +139,9 @@ em_bounce:
 	movl %ecx, BO_K(%r15)
 	movl %r8d, BO_W(%r15)
 	movl %r9d, BO_STORE(%r15)
+	movl EM_PACK(%rbx), %eax
+	movl %eax, BO_PACK(%r15)
+	movl $0, EM_PACK(%rbx)
 	movl 128(%rsp), %eax
 	movl %eax, BO_N(%r15)
 	movl 136(%rsp), %eax
@@ -330,6 +334,17 @@ em_bounce:
 	cmpl $0x28, %r9d
 	je 1f
 	movl $0x7f, %r8d
+	cmpl $0, BO_PACK(%r15)
+	je 1f
+	# a packed store (vpackstoreld, 0F38 D0, W0): the masked dword lanes
+	# land together at the slot's start, where .Lbo_copy takes BO_N bytes
+	# from (an extract's element: vpextrq $1 stored the slot's old bytes
+	# back, lanes 2 and 3 being at +8; common_speculative_init then read
+	# a stale vector end and walked an empty vector, 2026-10-14 rs21)
+	movl $2, %esi
+	movl $1, %edx
+	xorl %ecx, %ecx
+	movl $0xd0, %r8d
 1:	movl %r12d, %r9d
 	call mv_set
 	movq %r15, %rdi

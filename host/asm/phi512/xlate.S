@@ -2385,6 +2385,7 @@ xl_movq:
 	movl %eax, %r15d			# the lanes' mask register
 	testb $H_MEM, IN_HAS(%r12)
 	jz 2f
+	movl $1, EM_PACK(%rbx)			# the element packed to the slot's start (em_bounce), not at its lane
 	movq %rbx, %rdi
 	movzbl IN_REG(%r12), %esi
 	movq %r12, %rdx
@@ -2600,6 +2601,7 @@ xl_pextr:
 	movl %eax, %r15d
 	testb $H_MEM, IN_HAS(%r12)
 	jz 2f
+	movl $1, EM_PACK(%rbx)			# the element packed to the slot's start (em_bounce), not at its lane
 	movq %rbx, %rdi
 	movzbl IN_REG(%r12), %esi
 	movq %r12, %rdx

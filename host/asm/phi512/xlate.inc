@@ -54,6 +54,7 @@
 	.set EM_ENT, 92				# u64: its entry (EN_*)
 	.set EM_NBYTES, 100			# u32: the bytes the next unaligned move touches (0: from the mask or the length, and the conversion)
 	.set EM_KVAL, 104			# u32: the last mask immediate (em_mask_imm), 0 none: the lanes an unaligned move covers
+	.set EM_PACK, 108			# u32: 1 = the next bounced store packs its lanes to the slot's start (vpackstoreld: an extract's element, xl_pextr); em_bounce clears it
 	.set EM_BYTES, 112
 	.set EU_RAX, 1
 	.set EU_RCX, 2

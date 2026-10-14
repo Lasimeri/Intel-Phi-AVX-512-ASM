@@ -75,3 +75,15 @@ the element read back as 2); with them 69 of 69. A VEX check starts
 with an EVEX instruction: a block that begins with VEX runs it on the
 host (no fault until the first EVEX instruction), and tests nothing on
 the card.
+
+`vpextrq $1` and `vpextrd $3` to memory, EVEX and VEX (2026-10-14):
+the memory form went through the exact-footprint bounce, which stored
+the vector under the element's lanes at their own place in the
+scratch slot (lane 2 at +8) and copied the slot's start out, so the
+destination kept its old bytes. llama-server's
+`common_speculative_init` then compared an empty vector's begin with a
+stale end and walked it into address 0 (rs21, after the first forward
+pass). The bounce now packs the element to the slot's start
+(`vpackstoreld`, `EM_PACK` in [`mvex2.md`](../host/asm/phi512/mvex2.md)).
+Without the fix the four checks fail (the sentinel comes back); with it
+85 of 85.

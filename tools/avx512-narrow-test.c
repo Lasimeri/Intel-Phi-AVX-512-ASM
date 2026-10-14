@@ -172,6 +172,23 @@ int main(void)
     memset(&w, 0, sizeof w);
     w.q[0] = c.q[2];
     check("vmovq m64, xmm", &r, &w, 16);
+    /* vpextrq $1 / vpextrd $3 to memory, EVEX and VEX (2026-10-14: the
+     * bounce stored the element at its own lane in the scratch slot and
+     * copied the slot's start out, so the destination kept its old
+     * bytes: common_speculative_init read a stale vector end and walked
+     * an empty vector into address 0, rs21) */
+    {
+        uint64_t q = 0x5555555555555555ull;
+        uint32_t d = 0x55555555u;
+        asm volatile("vmovups %2, %%zmm16\n\t%{evex%} vpextrq $1, %%xmm16, %0\n\t%{evex%} vpextrd $3, %%xmm16, %1" : "=m"(q), "=m"(d) : "m"(c) : "xmm16", "memory");
+        check_u64("vpextrq $1 to memory (EVEX)", q, c.q[1]);
+        check_u64("vpextrd $3 to memory (EVEX)", d, c.u[3]);
+        q = 0x5555555555555555ull;
+        d = 0x55555555u;
+        asm volatile("vmovups %2, %%zmm16\n\tvmovdqu %2, %%xmm1\n\tvpextrq $1, %%xmm1, %0\n\tvpextrd $3, %%xmm1, %1" : "=m"(q), "=m"(d) : "m"(c) : "xmm1", "xmm16", "memory");
+        check_u64("vpextrq $1 to memory (VEX)", q, c.q[1]);
+        check_u64("vpextrd $3 to memory (VEX)", d, c.u[3]);
+    }
 
     /* 9. float16: vcvtph2ps from unaligned memory and from a register; vcvtps2ph */
     {
