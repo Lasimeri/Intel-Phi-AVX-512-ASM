@@ -494,6 +494,26 @@ eh_func_at:
 	leaq 8(%r10,%rax), %rax			# pc_begin (pcrel)
 	cmpq %r9, %rax
 	jne 8f
+	# not a PLT: one FDE covers a whole .plt (PLT0 `ff 35`, a stub `ff 25`,
+	# or with IBT endbr64 then `ff 25` / `f2 ff 25`); taken as a function, its
+	# stubs' jmp *GOT left the card at every call through them
+	# (libggml-base's ggml_is_contiguous_0@plt, lb10 2026-10-14). A stub is
+	# for plt_resolve.
+	movzwl (%rax), %ecx
+	cmpl $0x35ff, %ecx
+	je 8f
+	cmpl $0x25ff, %ecx
+	je 8f
+	cmpl $0xfa1e0ff3, (%rax)
+	jne 41f
+	movzwl 4(%rax), %ecx
+	cmpl $0x25ff, %ecx
+	je 8f
+	movl 4(%rax), %ecx
+	andl $0xffffff, %ecx
+	cmpl $0x25fff2, %ecx
+	je 8f
+41:
 	movl 12(%r10), %edx			# pc_range
 	movq OBJ_BASE(%rbx), %rcx
 	addq %r12, %rcx
