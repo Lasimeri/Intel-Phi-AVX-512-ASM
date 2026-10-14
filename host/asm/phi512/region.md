@@ -39,7 +39,10 @@ region_run(uc rdi, seed rsi, entry rdx) -> eax 0 (the frame is set),
    never came back (a `std::regex` bracket matcher built on the card,
    "0 line(s) back", a null store in the host; ASLR decided the run).
 3. Every resident unit compared with the program's memory
-   (`wu_refresh`): one the host wrote since gets its shadow updated, its
+   (`wu_refresh`: the reads and compares of the units by card 0's 16
+   workers and this thread at once, [`pool.md`](pool.md), each changed
+   line marked in the unit's bitmap; then the marked lines into the list
+   unit by unit here): one the host wrote since gets its shadow updated, its
    filled bit on the card cleared and a fill queued; the residency
    rounds run.
 4. `K_FEXEC` with `FXF_IDSTACK` (the file's rsp is the program's stack

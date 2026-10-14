@@ -93,6 +93,9 @@ phi512_sigill:
 	testq %rax, %rax
 	jnz 97b
 	call alt_check				# on this thread's alternate stack? (one made if none)
+	pushq %rax
+	call maps_invalidate			# the mappings read afresh once per fault (elf.S maps_load)
+	popq %rax
 	movq %rax, on_alt(%rip)
 	call now_ns
 	movq %rax, 0(%rsp)

@@ -15,8 +15,18 @@ lookup).
 
 ## `mapped_range(address)`
 
-The mapping holding an address, from `/proc/self/maps` read and
-scanned per call.
+The mapping holding an address, from the mappings' table.
+
+## `maps_load`, `maps_ensure`, `maps_invalidate`
+
+`/proc/self/maps` read once and parsed into a table (start, end,
+readable, writable) that `mapped_range` and `copy_mapped` consult;
+`sigill.S` invalidates it at every fault and the region path loads it
+before its workers read it. Reading and parsing the file per call was
+41 % of the faulting thread's time in `llama-server` (a call per unit
+per region, 395 mappings with CUDA loaded, 2026-10-14). `copy_mapped`
+also returns its page bitmaps in `edx` (pages, writable pages << 16):
+the workers call it at once and the globals are not theirs.
 
 ## `copy_mapped(dst, src, len)`
 

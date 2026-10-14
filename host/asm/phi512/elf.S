@@ -197,40 +197,27 @@ elf_find:
 # mappings; a cache comes with the residency table's host side).
 	.globl mapped_range
 mapped_range:
-	pushq %rbx
-	pushq %r12
-	pushq %r13
-	movq %rdi, %r13
-	call maps_read
-	testq %rax, %rax
-	jle 9f
-	leaq maps_buf(%rip), %rsi
-1:	cmpb $0, (%rsi)
-	je 9f
-	call parse_hex				# start
-	movq %rax, %r8
-	incq %rsi				# '-'
-	call parse_hex				# end
-	cmpq %r8, %r13
-	jb 2f
-	cmpq %rax, %r13
-	jae 2f
-	movq %rax, %rdx
-	movq %r8, %rax
-	jmp 8f
-2:	# to the next line
-	movzbl (%rsi), %ecx
-	testl %ecx, %ecx
+	cmpq $0, maps_valid(%rip)
+	jne 1f
+	pushq %rdi
+	call maps_load
+	popq %rdi
+1:	leaq maps_tab(%rip), %rcx
+	movq maps_n(%rip), %r8
+2:	testq %r8, %r8
 	jz 9f
-	incq %rsi
-	cmpl $'\n', %ecx
-	jne 2b
-	jmp 1b
+	cmpq 0(%rcx), %rdi
+	jb 3f
+	cmpq 8(%rcx), %rdi
+	jae 3f
+	movq 0(%rcx), %rax
+	movq 8(%rcx), %rdx
+	ret
+3:	addq $MAPT_BYTES, %rcx
+	decq %r8
+	jmp 2b
 9:	xorl %eax, %eax
 	xorl %edx, %edx
-8:	popq %r13
-	popq %r12
-	popq %rbx
 	ret
 
 # copy_mapped(dst rdi, src rsi, len rdx): the parts of [src, src + len)
@@ -244,6 +231,7 @@ mapped_range:
 	.globl copy_mapped
 copy_mapped:
 	pushq %rbx
+	pushq %rbp
 	pushq %r12
 	pushq %r13
 	pushq %r14
@@ -252,8 +240,7 @@ copy_mapped:
 	movq %rsi, %r13				# src
 	leaq (%rsi,%rdx), %r14			# src end
 	xorl %r15d, %r15d			# copied
-	movw $0, copy_mapped_pages(%rip)
-	movw $0, copy_mapped_wpages(%rip)
+	xorl %ebp, %ebp				# the pages (bits 0-15) and the writable ones (16-31): in a register, the workers call this at once (pool.S)
 	cmpq $0, mem_fd(%rip)
 	jne 14f
 	leaq s_mem(%rip), %rdi
@@ -263,20 +250,17 @@ copy_mapped:
 	testq %rax, %rax
 	js 9f
 	movq %rax, mem_fd(%rip)
-14:	call maps_read
-	testq %rax, %rax
-	jle 9f
-	leaq maps_buf(%rip), %rsi
-1:	cmpb $0, (%rsi)
-	je 9f
-	call parse_hex				# start
-	movq %rax, %r8
-	incq %rsi
-	call parse_hex				# end
-	movq %rax, %r9
-	incq %rsi				# ' '
-	cmpb $'r', (%rsi)
-	jne 2f
+14:	cmpq $0, maps_valid(%rip)
+	jne 141f
+	call maps_load
+141:	leaq maps_tab(%rip), %rsi		# the parsed mappings (maps_load: one read of /proc/self/maps a fault)
+	movq maps_n(%rip), %rbx
+1:	testq %rbx, %rbx
+	jz 9f
+	movq 0(%rsi), %r8			# start
+	movq 8(%rsi), %r9			# end
+	testb $MAPF_R, 16(%rsi)
+	jz 2f
 	# the overlap of [r8, r9) with [r13, r14)
 	cmpq %r13, %r8
 	jae 11f
@@ -299,10 +283,11 @@ copy_mapped:
 	movq $15, %rcx
 15:	cmpq %rcx, %rax
 	ja 16f
-	btsw %ax, copy_mapped_pages(%rip)
-	cmpb $'w', 1(%rsi)
-	jne 17f
-	btsw %ax, copy_mapped_wpages(%rip)
+	btsl %eax, %ebp
+	testb $MAPF_W, 16(%rsi)
+	jz 17f
+	leal 16(%rax), %r11d
+	btsl %r11d, %ebp
 17:	incq %rax
 	jmp 15b
 16:	pushq %rsi
@@ -318,18 +303,20 @@ copy_mapped:
 	js 13f
 	addq %rax, %r15
 13:	popq %rsi
-2:	movzbl (%rsi), %ecx
-	testl %ecx, %ecx
-	jz 9f
-	incq %rsi
-	cmpl $'\n', %ecx
-	jne 2b
+2:	addq $MAPT_BYTES, %rsi
+	decq %rbx
 	jmp 1b
 9:	movq %r15, %rax
+	movw %bp, copy_mapped_pages(%rip)	# (the single-threaded callers read these)
+	movl %ebp, %edx
+	shrl $16, %edx
+	movw %dx, copy_mapped_wpages(%rip)
+	movl %ebp, %edx				# the bitmaps returned: pages, writable pages << 16
 	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12
+	popq %rbp
 	popq %rbx
 	ret
 
@@ -683,3 +670,80 @@ heap_bounds:
 	popq %r12
 	popq %rbx
 	ret
+
+	.text
+	.set MAPT_MAX, 16384
+	.set MAPT_BYTES, 24			# start, end, flags (MAPF_*)
+	.set MAPF_R, 1
+	.set MAPF_W, 2
+# maps_load: /proc/self/maps read once and parsed into maps_tab (every
+# mapping's start, end, readable and writable bits), maps_valid set:
+# copy_mapped and mapped_range consult the table instead of reading and
+# parsing the file per call (that was 41 % of the faulting thread's time
+# in llama-server, a read per unit per region, 2026-10-14); sigill.S
+# invalidates it at every fault (maps_invalidate). eax the mappings.
+	.globl maps_load, maps_invalidate
+maps_load:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	movq $0, maps_n(%rip)
+	call maps_read
+	testq %rax, %rax
+	jle 8f
+	leaq maps_buf(%rip), %rsi
+	leaq maps_tab(%rip), %r12
+	xorl %ebx, %ebx
+1:	cmpb $0, (%rsi)
+	je 8f
+	cmpq $MAPT_MAX, %rbx
+	jae 8f
+	call parse_hex
+	movq %rax, 0(%r12)
+	incq %rsi				# '-'
+	call parse_hex
+	movq %rax, 8(%r12)
+	incq %rsi				# ' '
+	xorl %eax, %eax
+	cmpb $'r', 0(%rsi)
+	jne 2f
+	orl $MAPF_R, %eax
+2:	cmpb $'w', 1(%rsi)
+	jne 3f
+	orl $MAPF_W, %eax
+3:	movq %rax, 16(%r12)
+	addq $MAPT_BYTES, %r12
+	incq %rbx
+4:	movzbl (%rsi), %ecx			# to the next line
+	testl %ecx, %ecx
+	jz 8f
+	incq %rsi
+	cmpl $'\n', %ecx
+	jne 4b
+	jmp 1b
+8:	movq %rbx, maps_n(%rip)
+	movq $1, maps_valid(%rip)
+	movl %ebx, %eax
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+maps_invalidate:
+	movq $0, maps_valid(%rip)
+	ret
+	.bss
+	.balign 64
+maps_tab:	.skip MAPT_MAX * MAPT_BYTES
+maps_n:		.skip 8
+maps_valid:	.skip 8
+	.text
+
+	.text
+# maps_ensure: the mappings' table loaded if it is not (before pool.S's
+# workers read it at once: two loading it together would tear it).
+	.globl maps_ensure
+maps_ensure:
+	cmpq $0, maps_valid(%rip)
+	jne 1f
+	call maps_load
+1:	ret

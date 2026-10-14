@@ -703,7 +703,25 @@ wu_refresh:
 	pushq %r13
 	pushq %r14
 	pushq %r15
+	# phase 0 (here): what the workers share made ready first: the
+	# /proc/self/mem descriptor (copy_mapped of nothing opens it), the
+	# mappings' table, the pool (16 workers a card, made once)
+	leaq stage_buf(%rip), %rdi
+	xorl %esi, %esi
+	xorl %edx, %edx
+	call copy_mapped
+	call maps_ensure
+	movl ncards(%rip), %edi
+	call pool_start
+	# phase 1 (card 0's workers and this thread): every unit read and
+	# compared, its changed lines into its shadow and its bitmap
+	xorl %edi, %edi
+	leaq wu_refresh_unit(%rip), %rsi
+	movq wu_n(%rip), %rdx
+	call pool_run
+	# phase 2 (here): the changed lines into the refresh list, unit by unit
 	leaq wu_tab(%rip), %rbx
+	leaq wu_chg(%rip), %r13
 	movq wu_n(%rip), %r12
 1:	testq %r12, %r12
 	jz 9f
@@ -721,64 +739,26 @@ wu_refresh:
 	movq cards + CD_DATAP(%rip), %rcx
 	movq SD_REFRESH_TAB - 16 + 8(%rcx,%rax), %rax
 	movq %rax, rf_save_last(%rip)
-10:	leaq stage_buf(%rip), %rdi
-	movq WU_ADDR(%rbx), %rsi
-	movl $UNIT, %edx
-	call copy_mapped
-	movzwl copy_mapped_pages(%rip), %eax
-	movw %ax, WU_PAGES(%rbx)		# the pages as mapped now (the program may have unmapped some)
-	movzwl copy_mapped_wpages(%rip), %eax
-	movw %ax, WU_WPAGES(%rbx)
-	xorl %r13d, %r13d			# page
-2:	cmpl $16, %r13d
+10:	xorl %r14d, %r14d			# the line (0 to 1023)
+2:	cmpl $1024, %r14d
 	jae 8f
-	btw %r13w, WU_PAGES(%rbx)
-	jnc 7f
-	xorl %r14d, %r14d			# the line's offset in the page
-3:	cmpl $4096, %r14d
-	jae 7f
-	movq %r13, %r15
-	shlq $12, %r15
-	addq %r14, %r15				# the offset in the unit
-	movq WU_ADDR(%rbx), %rax
-	addq %r15, %rax
-	cmpq WU_LO(%rbx), %rax
-	jb 6f					# below the floor: the handler's own stack
-	leaq stage_buf(%rip), %rsi
-	addq %r15, %rsi
-	movq WU_SHADOW(%rbx), %rdi
-	addq %r15, %rdi
-	cmpq WU_FLO(%rbx), %rax
-	jb 41f
-	cmpq WU_FHI(%rbx), %rax
-	jb 5f					# in the forced range: whole, compared or not
-41:	xorl %ecx, %ecx
-4:	movq (%rsi,%rcx), %rax
-	cmpq (%rdi,%rcx), %rax
-	jne 5f
-	addq $8, %rcx
-	cmpq $64, %rcx
-	jb 4b
-	jmp 6f
-5:	# changed: the shadow line, then the list
-	xorl %ecx, %ecx
-51:	movq (%rsi,%rcx), %rax
-	movq %rax, (%rdi,%rcx)
-	addq $8, %rcx
-	cmpq $64, %rcx
-	jb 51b
+	btq %r14, (%r13)
+	jnc 6f
+	movq %r14, %r15
+	shlq $6, %r15				# its offset
 	movq WU_ADDR(%rbx), %rdi
 	addq %r15, %rdi
+	movq WU_SHADOW(%rbx), %rsi
+	addq %r15, %rsi				# the shadow holds the new bytes (phase 1)
 	call refresh_add
 	testl %eax, %eax
 	jnz .Lrf_full
-6:	addl $64, %r14d
-	jmp 3b
-7:	incl %r13d
+6:	incl %r14d
 	jmp 2b
 8:	movq $0, WU_FLO(%rbx)
 	movq $0, WU_FHI(%rbx)
 	addq $WU_BYTES, %rbx
+	addq $128, %r13
 	decq %r12
 	jmp 1b
 9:	popq %r15
@@ -788,8 +768,9 @@ wu_refresh:
 	popq %rbx
 	ret
 .Lrf_full:
-	# the list is full: this unit by a DMA refill (the rest of its lines
-	# into the shadow whole), with the card's filled bit cleared
+	# the list is full: this unit by a DMA refill, with the card's filled
+	# bit cleared (its shadow is new already, and card_resident_post sets
+	# it from the staged bytes again)
 	incq stat_refresh_full(%rip)
 	# the lines this unit already put in the list taken back: the refill
 	# below is a second read of the program's memory, and the card would
@@ -808,12 +789,7 @@ wu_refresh:
 	movq cards + CD_DATAP(%rip), %rcx
 	movq rf_save_last(%rip), %rdx
 	movq %rdx, SD_REFRESH_TAB - 16 + 8(%rcx,%rax)
-11:
-	movq WU_SHADOW(%rbx), %rdi
-	leaq stage_buf(%rip), %rsi
-	movl $UNIT, %edx
-	call mem_copy
-	leaq cards + CD_TAB(%rip), %rdi
+11:	leaq cards + CD_TAB(%rip), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	andq $-CHUNK, %rsi
 	call tab_find
@@ -835,6 +811,87 @@ wu_refresh:
 	movl $1, %ecx
 	call need_add
 	jmp 8b
+
+# wu_refresh_unit(unit rdi, a 64 KiB buffer rsi): one unit of the refresh
+# (pool.S's workers run these at once, a unit each, so nothing here is
+# shared but read): the program's 64 KiB read into the buffer
+# (copy_mapped, its page bitmaps returned in edx), then, over the
+# readable pages above the floor, a line that differs from the shadow
+# (or lies in the forced range) copied into the shadow and marked in the
+# unit's bitmap (wu_chg) for the list.
+wu_refresh_unit:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rax
+	imulq $WU_BYTES, %rax, %rbx
+	leaq wu_tab(%rip), %rcx
+	addq %rcx, %rbx				# the entry
+	movq %rdi, %r13
+	shlq $7, %r13
+	leaq wu_chg(%rip), %rcx
+	addq %rcx, %r13				# its bitmap (128 bytes)
+	movq %rsi, %r12				# the buffer
+	xorl %eax, %eax
+	movl $16, %ecx
+1:	movq %rax, -8(%r13,%rcx,8)
+	loop 1b
+	movq %r12, %rdi
+	movq WU_ADDR(%rbx), %rsi
+	movl $UNIT, %edx
+	call copy_mapped
+	movw %dx, WU_PAGES(%rbx)		# the pages as mapped now
+	shrl $16, %edx
+	movw %dx, WU_WPAGES(%rbx)
+	xorl %r14d, %r14d			# the line (0 to 1023)
+2:	cmpl $1024, %r14d
+	jae 9f
+	movl %r14d, %eax
+	shrl $6, %eax				# its page
+	btw %ax, WU_PAGES(%rbx)
+	jnc 7f
+	movq %r14, %r15
+	shlq $6, %r15				# its offset
+	movq WU_ADDR(%rbx), %rax
+	addq %r15, %rax
+	cmpq WU_LO(%rbx), %rax
+	jb 7f					# below the floor: the handler's own stack
+	leaq (%r12,%r15), %rsi
+	movq WU_SHADOW(%rbx), %rdi
+	addq %r15, %rdi
+	cmpq WU_FLO(%rbx), %rax
+	jb 3f
+	cmpq WU_FHI(%rbx), %rax
+	jb 5f					# in the forced range: whole, compared or not
+3:	xorl %ecx, %ecx
+4:	movq (%rsi,%rcx), %rax
+	cmpq (%rdi,%rcx), %rax
+	jne 5f
+	addq $8, %rcx
+	cmpq $64, %rcx
+	jb 4b
+	jmp 7f
+5:	xorl %ecx, %ecx
+6:	movq (%rsi,%rcx), %rax
+	movq %rax, (%rdi,%rcx)
+	addq $8, %rcx
+	cmpq $64, %rcx
+	jb 6b
+	btsq %r14, (%r13)
+7:	incl %r14d
+	jmp 2b
+9:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.bss
+	.balign 64
+wu_chg:	.skip WU_MAX * 128			# per unit, a bit per line the refresh found changed
+	.text
 
 # refresh_add(addr rdi, bytes rsi): the line into the refresh list of
 # card 0's slot data: coalesced with the last range when contiguous;
