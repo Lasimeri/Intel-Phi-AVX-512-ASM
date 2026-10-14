@@ -381,6 +381,9 @@ fexec_run:
 	pushq %rdx
 	shrq $6, %rdx
 	call phi_copy64
+	movq 0(%r15), %rdi			# the card-side copies follow (the write-back diff's baseline)
+	movq 8(%r15), %rsi
+	call wsh_sync
 	popq %rdx
 	popq %rsi
 	addq %rdx, %rsi

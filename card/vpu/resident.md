@@ -162,3 +162,25 @@ back: E_ALLOC on the second pass of the region test's kernel5).
 
 Gate: `tools/avx512-region-test.c` kernel5 (384 MiB of a PROT_READ file
 mapping, read twice, against a 256 MiB pool at `-R 128`): bit-exact.
+
+## The card-side write-back diff (2026-10-14)
+
+The host used to pull every writable unit back after every region (a
+`K_PUSH` of 64 KiB per unit, about 0.25 ms each) to diff it against its
+shadow: late in llama-server's load that was about 200 requests a region
+(card 0 at 3,022 requests/s, 76% busy, 15 regions/s). Now the slot keeps
+its own copy of each unit as the host sent it (`wsh_base`, a 64 KiB copy
+per `wmap` index in a no-reserve mapping hinted below the program's
+range; `wsh_fill` after a unit's fill, `wsh_sync` after each refresh
+range), and after a `K_FEXEC` with `FXF_CARDWB` whose exit is not a
+fault, `wb_card_diff` has the pool compare every unit with its copy
+(`wd_slice` over up to 32 slices: a bit per changed 64-byte line in
+`wd_bits`, the copy brought up to date), then lists the changed lines,
+adjacent ones as one range, in the slot data's `SD_WB_TAB` and `SD_WB`;
+the reply's `wb_n` is the count of ranges, -1 when they overflow (1024
+ranges or 240 KiB), and the host then pulls the units as before. No diff
+after a fault: the host re-posts without writing back, and moving the
+baseline then would lose the lines. Measured on card 0: the narrow suite
+65 to 109 ms against 150 to 230 ms pulling, identical lines written
+back (306); every region of the three gates took the card's list, none
+overflowed.

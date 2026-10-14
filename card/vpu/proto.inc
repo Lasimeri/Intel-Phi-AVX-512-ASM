@@ -109,6 +109,7 @@
 	.endif
 # K_FEXEC flags (SL_FLAGS).
 	.set FXF_IDSTACK, 1			# the file's rsp is the program's stack at identity: no run stack, no return stub
+	.set FXF_CARDWB, 2			# after a run that did not fault: the card's own diff of its writable units as the write-back (resident.S wb_card_diff)
 	.set EXEC_MAX_RANGES, 64
 	.set EXEC_MAX_PAGES, 64
 	.set EXEC_MAX_THREADS, 64

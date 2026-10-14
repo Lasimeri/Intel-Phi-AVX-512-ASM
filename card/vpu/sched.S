@@ -658,6 +658,16 @@ sched_main:
 	testl %eax, %eax
 	jnz 1f
 	call wb_ranges
+	testl $FXF_CARDWB, slreq + SL_FLAGS(%rip)	# the card's own diff as the write-back, unless the run faulted (the host re-posts
+	jz 1f					# without writing back: a diff now would move the baseline past lines it never got)
+	cmpl $X_FAULT, reply_buf + SR_EXIT_KIND(%rip)
+	je 1f
+	movq %r12, %rdi
+	shlq $20, %rdi
+	addq $OFF_SLOTDATA, %rdi
+	addq window(%rip), %rdi
+	leaq reply_buf(%rip), %rsi
+	call wb_card_diff
 1:	movq shared(%rip), %rcx
 	movq SHG_FREE_BYTES(%rcx), %rax
 	movq %rax, reply_buf + SR_FREE_BYTES(%rip)

@@ -228,7 +228,11 @@ region_run:
 	jb 81b
 	movl $2, %edi
 	call l_end
-0:	movq $FXF_IDSTACK, fexec_flags(%rip)
+0:	movq $FXF_IDSTACK | FXF_CARDWB, fexec_flags(%rip)
+	cmpq $0, cardwb_off(%rip)
+	je 77f
+	movq $FXF_IDSTACK, fexec_flags(%rip)	# PHI512_CARDWB=0: the host pulls every unit back
+77:
 	movq %rbx, %rdi
 	movq %r13, %rsi
 	leaq region_file(%rip), %rdx
@@ -984,7 +988,13 @@ wu_diff_pages:
 # mapped pages above the floor; a changed line goes into the program's
 # memory and the shadow. rax the lines written.
 wu_writeback:
-	pushq %rbx
+	cmpq $0, cardwb_off(%rip)
+	jne 0f
+	movq cards + CD_SLOTP(%rip), %rax	# the card's own diff (FXF_CARDWB): its list, unless it overflowed
+	cmpl $-1, SLOT_REPLY + SR_WB_N(%rax)
+	jne wu_writeback_card
+	incq stat_cardwb_full(%rip)
+0:	pushq %rbx
 	pushq %r12
 	pushq %r13
 	pushq %r14
@@ -2029,4 +2039,79 @@ blob_at:
 2:	incq %rcx
 	jmp 1b
 8:	xorl %eax, %eax
+	ret
+
+# wu_writeback_card: the write-back from the card's own diff (card
+# resident.S wb_card_diff, asked for with FXF_CARDWB): the reply's wb_n
+# ranges ({address, bytes} at SD_WB_TAB of the slot data, their bytes in
+# order at SD_WB), each 64-byte line applied as the pulled units' lines
+# were: a line of a unit this table holds, above its floor, in a page the
+# program can write, its changed bytes alone to the program and the
+# shadow (wb_line_apply). Before, every unit was pulled back (a K_PUSH,
+# ~0.25 ms, per unit per region: ~200 requests a region late in
+# llama-server's load, 2026-10-14). rax the lines written.
+	.bss
+	.balign 8
+	.globl cardwb_off, stat_cardwb, stat_cardwb_full
+cardwb_off:	.skip 8			# PHI512_CARDWB=0 (main.S)
+stat_cardwb:	.skip 8			# write-backs from the card's list
+stat_cardwb_full:	.skip 8		# lists that overflowed (the units pulled instead)
+	.text
+wu_writeback_card:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	incq stat_cardwb(%rip)
+	movq cards + CD_SLOTP(%rip), %rax
+	movl SLOT_REPLY + SR_WB_N(%rax), %r12d	# ranges left
+	movq cards + CD_DATAP(%rip), %r13
+	leaq SD_WB(%r13), %r14			# the bytes
+	addq $SD_WB_TAB, %r13			# the table
+	xorl %r15d, %r15d			# lines written
+1:	testl %r12d, %r12d
+	jz 9f
+	movq 0(%r13), %rbx			# the range's address
+	movq 8(%r13), %rax			# its bytes
+	pushq %rax
+	pushq %rax
+2:	cmpq $0, (%rsp)
+	je 8f
+	movq %rbx, %rdi
+	call wu_find
+	testq %rax, %rax
+	jz 7f
+	cmpq WU_LO(%rax), %rbx			# below the unit's floor: not the program's any more
+	jb 7f
+	movq %rbx, %rcx
+	subq WU_ADDR(%rax), %rcx		# the offset in the unit
+	movq %rcx, %rdx
+	shrq $12, %rdx
+	btw %dx, WU_WPAGES(%rax)		# a page the program cannot write is never written back
+	jnc 7f
+	movq WU_SHADOW(%rax), %rdx
+	addq %rcx, %rdx				# the shadow's line
+	movq %rbx, %rdi
+	movq %r14, %rsi				# the card's line
+	call wb_line_apply
+	testl %eax, %eax
+	jz 7f
+	incq %r15
+7:	addq $64, %rbx
+	addq $64, %r14
+	subq $64, (%rsp)
+	jmp 2b
+8:	popq %rax
+	popq %rax
+	addq $16, %r13
+	decl %r12d
+	jmp 1b
+9:	addq %r15, stat_wb_lines(%rip)
+	movq %r15, %rax
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
 	ret

@@ -20,6 +20,7 @@ s_env_disable:	.asciz "PHI512_DISABLE"
 s_env_handblobs: .asciz "PHI512_HANDBLOBS"
 s_env_heapcheck: .asciz "PHI512_HEAPCHECK"
 s_env_incall:	.asciz "PHI512_INCALL"
+s_env_cardwb:	.asciz "PHI512_CARDWB"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -29,6 +30,11 @@ s_fin3:	.asciz " ms; "
 s_fin4:	.asciz " chunk(s) made resident in "
 s_fin5:	.asciz " ms; outputs fetched in "
 s_fin6:	.asciz " ms"
+s_fin7:	.asciz "phi512: "
+s_fin8:	.asciz " region(s); write-backs from the card's own diff "
+s_fin9:	.asciz ", lists that overflowed (units pulled) "
+s_fin10:	.asciz ", lines written back "
+s_fin11:	.asciz ""
 s_t1:	.asciz "phi512: init: environment read"
 s_t2:	.asciz "phi512: init: cpuid done"
 s_t3:	.asciz "phi512: init: executable mapped"
@@ -74,6 +80,13 @@ phi512_init:
 	testq %rax, %rax
 	sete %cl
 	movq %rcx, incall_off(%rip)
+	leaq s_env_cardwb(%rip), %rdi		# PHI512_CARDWB=0: the host pulls every unit back after a region (region.S wu_writeback)
+	movl $1, %esi
+	call env_u64
+	xorl %ecx, %ecx
+	testq %rax, %rax
+	sete %cl
+	movq %rcx, cardwb_off(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f
@@ -139,9 +152,32 @@ phi512_init:
 	ret
 
 phi512_fini:
-	cmpq $0, verbose(%rip)
-	je 9f
 	cmpq $0, ncards(%rip)
+	je 9f
+	cmpq $0, stat_regions(%rip)		# always, when regions ran: their count and how their write-backs came
+	je 1f
+	call l_begin				# the regions and how their write-backs came
+	leaq s_fin7(%rip), %rsi
+	call w_str
+	movq stat_regions(%rip), %rdi
+	call w_dec
+	leaq s_fin8(%rip), %rsi
+	call w_str
+	movq stat_cardwb(%rip), %rdi
+	call w_dec
+	leaq s_fin9(%rip), %rsi
+	call w_str
+	movq stat_cardwb_full(%rip), %rdi
+	call w_dec
+	leaq s_fin10(%rip), %rsi
+	call w_str
+	movq stat_wb_lines(%rip), %rdi
+	call w_dec
+	leaq s_fin11(%rip), %rsi
+	call w_str
+	movl $2, %edi
+	call l_end
+1:	cmpq $0, verbose(%rip)
 	je 9f
 	call l_begin
 	leaq s_fin1(%rip), %rsi

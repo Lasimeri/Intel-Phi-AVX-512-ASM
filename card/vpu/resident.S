@@ -871,6 +871,13 @@ res_map_units:
 	addq %rbx, %rdi				# into the unit
 	movl $WUNIT_BYTES / 64, %edx
 	call phi_copy64
+	call wsh_init				# the card-side copy, as the host's shadow has it (the write-back diff)
+	testl %eax, %eax
+	jz 7f
+	movq %r15, %rdi
+	shlq $16, %rdi
+	addq %rbx, %rdi
+	call wsh_fill
 7:	incl %r15d
 	jmp 1b
 8:	xorl %eax, %eax
