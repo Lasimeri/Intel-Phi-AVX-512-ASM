@@ -1930,33 +1930,52 @@ xl_movss:
 	movl $0x0003, %r15d
 1:	testb $H_MEM, IN_HAS(%r12)
 	jnz .Lmovss_mem
-	# register form: d = {s2 lane 0, s1 lanes 1..3} (lanes 2 3 for sd come from s1 too)
+	# register form: d = {s2 lane 0, s1 lanes 1..3} (lanes 2 3 for sd come
+	# from s1 too). Opcode 10 (RVM): d is ModRM.reg, s2 ModRM.rm; opcode
+	# 11 (MVR, the store opcode's register form): d is ModRM.rm, s2
+	# ModRM.reg. Before 2026-10-14 both were taken as 10: gcc's
+	# `vmovsd %xmm10,%xmm10,%xmm3` (c5 2b 11 d3) wrote xmm10 and left xmm3
+	# stale, and ggml_compute_forward_scale's bias path built a row pointer
+	# from it (lb1-lb4: a fault at 0xffffd6ed650d2240). The two moves take
+	# disjoint lanes, each skipped when its source is d: s1 first under the
+	# lanes above the element would otherwise overwrite s2 when d is s2.
 	movzbl IN_REG(%r12), %eax
+	movzbl IN_RM(%r12), %ecx
+	cmpb $0x11, IN_OP(%r12)
+	jne 11f
+	xchgl %eax, %ecx
+11:	movl %eax, 8(%rsp)			# d
+	movl %ecx, 12(%rsp)			# s2
 	cmpb IN_VVVV(%r12), %al
 	je 2f
-	# d != s1: d{low 4 lanes} = s1 first
+	# d != s1: d{the low 4 lanes but the element's} = s1
 	movq %rbx, %rdi
 	movl $0x000f, %esi
+	xorl %r15d, %esi
 	call em_mask_imm
 	movq %rbx, %rdi
-	movzbl IN_REG(%r12), %esi
+	movl 8(%rsp), %esi
 	movl $RM_REG, %edx
 	movzbl IN_VVVV(%r12), %ecx
 	movl %eax, %r8d
 	xorl %r9d, %r9d
 	call em_vmov
-2:	movq %rbx, %rdi
+2:	movl 8(%rsp), %eax
+	cmpl 12(%rsp), %eax
+	je 21f
+	# d != s2: d{the element's lanes} = s2
+	movq %rbx, %rdi
 	movl %r15d, %esi
 	call em_mask_imm
 	movq %rbx, %rdi
-	movzbl IN_REG(%r12), %esi
+	movl 8(%rsp), %esi
 	movl $RM_REG, %edx
-	movzbl IN_RM(%r12), %ecx
+	movl 12(%rsp), %ecx
 	movl %eax, %r8d
 	xorl %r9d, %r9d
 	call em_vmov
-	movq %rbx, %rdi
-	movzbl IN_REG(%r12), %esi
+21:	movq %rbx, %rdi
+	movl 8(%rsp), %esi
 	movl $0xfff0, %edx
 	call em_zero_lanes
 	jmp .Lmovss_ok

@@ -189,6 +189,31 @@ int main(void)
         check_u64("vpextrq $1 to memory (VEX)", q, c.q[1]);
         check_u64("vpextrd $3 to memory (VEX)", d, c.u[3]);
     }
+    /* vmovss / vmovsd register forms: the 10 encoding (RVM) and the 11 one
+     * (MVR: d is ModRM.rm, the element from ModRM.reg; GAS {store}), and d
+     * equal to the element's source (2026-10-14: the 11 form wrote the
+     * ModRM.reg register and left d stale; ggml_compute_forward_scale's
+     * bias path built a row pointer from it: lb1-lb4 faulted at a
+     * kernel-half address in llama-bench's prompt pass) */
+    {
+        asm volatile("vmovups %1, %%zmm16\n\tvmovdqu %1, %%xmm1\n\tvmovdqu %2, %%xmm2\n\tvpxor %%xmm3, %%xmm3, %%xmm3\n\t%{store%} vmovsd %%xmm1, %%xmm2, %%xmm3\n\tvmovups %%zmm3, %0" : "=m"(r) : "m"(a), "m"(b) : "xmm1", "xmm2", "xmm3", "xmm16", "memory");
+        memset(&w, 0, sizeof w);
+        w.q[0] = a.q[0];
+        w.q[1] = b.q[1];
+        check("vmovsd xmm, xmm, xmm (11, MVR)", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm16\n\tvmovdqu %1, %%xmm1\n\tvmovdqu %2, %%xmm2\n\tvpxor %%xmm3, %%xmm3, %%xmm3\n\t%{store%} vmovss %%xmm1, %%xmm2, %%xmm3\n\tvmovups %%zmm3, %0" : "=m"(r) : "m"(a), "m"(b) : "xmm1", "xmm2", "xmm3", "xmm16", "memory");
+        memset(&w, 0, sizeof w);
+        w.u[0] = a.u[0];
+        w.u[1] = b.u[1]; w.u[2] = b.u[2]; w.u[3] = b.u[3];
+        check("vmovss xmm, xmm, xmm (11, MVR)", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm16\n\tvmovdqu %1, %%xmm1\n\tvmovdqu %2, %%xmm2\n\tvmovss %%xmm1, %%xmm2, %%xmm1\n\tvmovups %%zmm1, %0" : "=m"(r) : "m"(a), "m"(b) : "xmm1", "xmm2", "xmm16", "memory");
+        check("vmovss xmm1, xmm2, xmm1 (d is the element's source)", &r, &w, 16);
+        asm volatile("vmovups %1, %%zmm17\n\tvmovups %2, %%zmm18\n\tvpxord %%zmm16, %%zmm16, %%zmm16\n\t%{store%} vmovsd %%xmm17, %%xmm18, %%xmm16\n\tvmovups %%zmm16, %0" : "=m"(r) : "m"(a), "m"(b) : "xmm16", "xmm17", "xmm18", "memory");
+        memset(&w, 0, sizeof w);
+        w.q[0] = a.q[0];
+        w.q[1] = b.q[1];
+        check("vmovsd xmm16-18 (EVEX 11, MVR)", &r, &w, 16);
+    }
 
     /* 9. float16: vcvtph2ps from unaligned memory and from a register; vcvtps2ph */
     {

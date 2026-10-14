@@ -310,6 +310,18 @@ region_run:
 	jae .Lrg_step
 	cmpq $0x10000, %r15			# a fault with no address: a general-protection fault, not a missing page
 	jb .Lrg_gp
+	# an address the program has no mapping at (2026-10-14 lb2: a unit
+	# queued at 0xffffd62ea6600000, which the card could only refuse, and
+	# the run died with E_ALLOC and no rip): a wrong address, said with
+	# the rip and the registers like a general-protection fault
+	pushq %rcx
+	pushq %rcx
+	movq %r15, %rdi
+	call mapped_range
+	popq %rcx
+	popq %rcx
+	testq %rax, %rax
+	jz .Lrg_gp
 	incq stat_faults(%rip)
 	pushq %rcx
 	call needs_reset
@@ -2466,7 +2478,108 @@ rg_report_exit:
 	call w_hexn
 	movl $2, %edi
 	call l_end
-	popq %r15
+	movq %rbx, %rdi				# the source instruction and the blob's bytes there
+	call blob_at
+	testq %rax, %rax
+	jz 1f
+	movq %rax, %rdi
+	movq %rdx, %rsi
+	call rx_src
+1:	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# rx_src(seed rdi, blob offset rsi): the source instruction a blob offset
+# belongs to, said on its own line: the instruction's index, its offset
+# in the function and its address, then the blob's bytes from that
+# instruction's translation up to 16 past the offset (at most 128), for
+# objdump (2026-10-14: lb3 died at ggml_compute_forward_scale +64e1, a
+# blob offset only the run's own translation can place).
+	.section .rodata
+s_rs1:	.asciz "phi512:   blob +"
+s_rs2:	.asciz " is instruction "
+s_rs3:	.asciz " at function +"
+s_rs4:	.asciz " ("
+s_rs5:	.asciz "); its blob from +"
+s_rs6:	.asciz ": "
+s_rs7:	.asciz " "
+	.text
+rx_src:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	cmpq $0, SD_MAP(%rbx)
+	je 9f
+	cmpq $0, SD_ABLOB(%rbx)
+	je 9f
+	movq SD_MAP(%rbx), %rcx
+	movq SD_NINSN(%rbx), %rdx
+	xorl %r13d, %r13d			# the last instruction whose blob offset is at or below
+	xorl %eax, %eax
+1:	cmpq %rdx, %rax
+	jae 2f
+	movl (%rcx,%rax,4), %r8d
+	cmpq %r12, %r8
+	ja 11f
+	movq %rax, %r13
+11:	incq %rax
+	jmp 1b
+2:	call l_begin
+	leaq s_rs1(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	call w_hexn
+	leaq s_rs2(%rip), %rsi
+	call w_str
+	movq %r13, %rdi
+	call w_dec
+	leaq s_rs3(%rip), %rsi
+	call w_str
+	movq SD_INDEX(%rbx), %rax
+	movq %r13, %rcx
+	shlq $4, %rcx				# IX_BYTES
+	movl (%rax,%rcx), %r14d			# IX_OFF (0: fnscan.inc)
+	movq %r14, %rdi
+	call w_hexn
+	leaq s_rs4(%rip), %rsi
+	call w_str
+	movq SD_ADDR(%rbx), %rdi
+	addq %r14, %rdi
+	call w_hexn
+	leaq s_rs5(%rip), %rsi
+	call w_str
+	movq SD_MAP(%rbx), %rax
+	movl (%rax,%r13,4), %r14d		# the instruction's blob offset
+	movq %r14, %rdi
+	call w_hexn
+	leaq s_rs6(%rip), %rsi
+	call w_str
+	leaq 16(%r12), %r15			# the end
+	movq %r14, %rax
+	addq $128, %rax
+	cmpq %rax, %r15
+	jbe 3f
+	movq %rax, %r15
+3:	cmpq %r15, %r14
+	jae 4f
+	movq SD_ABLOB(%rbx), %rax
+	movzbl (%rax,%r14), %edi
+	movl $2, %ecx
+	call w_hex
+	leaq s_rs7(%rip), %rsi
+	call w_str
+	incq %r14
+	jmp 3b
+4:	movl $2, %edi
+	call l_end
+9:	popq %r15
 	popq %r14
 	popq %r13
 	popq %r12

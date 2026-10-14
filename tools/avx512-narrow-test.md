@@ -87,3 +87,15 @@ pass). The bounce now packs the element to the slot's start
 (`vpackstoreld`, `EM_PACK` in [`mvex2.md`](../host/asm/phi512/mvex2.md)).
 Without the fix the four checks fail (the sentinel comes back); with it
 85 of 85.
+
+`vmovss`/`vmovsd` register forms (2026-10-14): the 11 encoding (MVR,
+GAS `{store}`: the destination is ModRM.rm, the element comes from
+ModRM.reg, bits above it from VEX.vvvv) in VEX and EVEX, and the 10
+encoding with the destination equal to the element's source. The
+recipe took every register form as 10 (it wrote the ModRM.reg register
+and left the destination stale), and moved the upper lanes first, which
+overwrote the element's source when it was the destination. gcc's
+`vmovsd %xmm10,%xmm10,%xmm3` in `ggml_compute_forward_scale` then fed a
+stale pointer into a row address (llama-bench's prompt pass faulted at
+0xffffd6ed650d2240, lb1-lb4). With the old library the four checks
+fail; with the fix 89 of 89.
