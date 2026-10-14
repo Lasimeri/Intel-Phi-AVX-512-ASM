@@ -39,6 +39,8 @@ the time the outputs took to fetch (the counters of `sigill.S` and
 | --- | --- |
 | `PHI512_DISABLE` | set: the library does nothing |
 | `PHI512_VERBOSE` | set: init steps, a line per call, the exit report |
+| (none) | the SIGILL handler is installed with `SA_ONSTACK` and the main thread gets a 256 KiB alternate signal stack (`alt_install`, [`sigill.md`](sigill.md)) |
+| `PHI512_HEAPCHECK` | set: the main arena's heap walked chunk by chunk at every region's start and after its write-back; the first break reported once with the region's number ([`region.md`](region.md), the heap walk) |
 | `PHI512_CARDS=0,1,2,3` | the cards to use, in order (comma list) |
 | `PHI512_CARD=N` | one card |
 | `PHI512_SLOT=N` | the slot to use on every card (0) |

@@ -65,6 +65,7 @@
 #define VPU_X_DEFER_FULL 7
 #define VPU_X_LIMIT      8
 #define VPU_X_JUMP       9   /* the host resumes at exit_rip (a branch out, an indirect jump, a return) */
+#define VPU_X_HOST      10   /* an instruction the host runs itself (the blob's lazy path): the host resumes at exit_rip */
 #define VPU_FXF_IDSTACK  1   /* K_FEXEC flags: the file's rsp is the program's stack at identity */
 #define VPU_FX_EXIT_TPOFF 1048 /* fs-relative: the exit stub's address (TLS_EXEC + 24) */
 #define VPU_FX_S_KIND    436 /* scratch slots the exit reads: the kind, the resume address, the aux */

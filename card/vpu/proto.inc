@@ -282,6 +282,7 @@
 	.set X_LOOP, 6
 	.set X_DEFER_FULL, 7
 	.set X_LIMIT, 8
+	.set X_HOST, 10				# an instruction the host runs itself (blob.S's lazy path): the host resumes at the exit's rip
 	.set X_JUMP, 9				# the host resumes at the exit's rip (a branch out of the blob, an indirect jump, a return)
 # struct vpu_slot: the request at 0, the reply at SLOT_REPLY, the demand
 # mail at SLOT_MAIL, the progress line at SLOT_PROGRESS.

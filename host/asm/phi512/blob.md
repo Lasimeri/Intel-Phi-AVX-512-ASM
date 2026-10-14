@@ -40,3 +40,34 @@ The three seamless kernels (23, 19 and 22 instructions) become blobs of
 first integer blob's constant displacement read wrong under objdump's
 misparse of the MVEX bytes before it and was right; the real fault was
 the SIB index ([`mvex.md`](mvex.md)).
+
+## Lazy sites (2026-10-14)
+
+An instruction the blob cannot carry no longer refuses the whole
+function. A recipe that refuses (`xl_insn` nonzero), a legacy SSE or x87
+form, a loop or `jrcxz` instruction, a rip-relative operand with no
+free scratch register and an atomic on the program's memory (a `lock`
+prefix, or `xchg` with memory: on the card it would be atomic on the
+card's copy alone, and the program's other threads would lose their
+updates) all go to `.Llazy`: what the path emitted for the
+instruction is rolled back to its start (its rip-map entry, and the
+counts of constants, fixups and branch fixups snapshotted at `.Lnext`),
+and an exit takes its place at the instruction's own address
+(`S_SITE`), the same 57-byte sequence as a branch out:
+
+- `X_HOST` (10) when the host runs the instruction itself
+  (`lazy_host_ok`): any legacy form, and a VEX form unless it is one of
+  the AVX-512 opmask instructions (VEX-encoded, AVX-512F/BW/DQ) or a VEX
+  form of a feature the EPYC 7742 lacks (VNNI, NE-CONVERT, AMX, IFMA,
+  SHA512, GFNI, VNNI-INT16, SM3/SM4, VAES and VPCLMULQDQ at 256 bits,
+  CMPccXADD; the host's flags from the rack's `/proc/cpuinfo`). The host
+  executes it and goes on natively to the next fault: a new region.
+- `X_REFUSED` (5) for an EVEX form: the program dies there only if the
+  card reaches it.
+
+`blob_lazy` keeps the first 256 sites of the last build (offset, kind,
+reason) for [`xlfn.S`](xlfn.md)'s log and [`xlate-check`](../../../tools/xlate-check.md).
+Measured: `llama-server` went from refusing `common_params_fit_impl`
+(one VEX.128 `vshufpd`) at 1080 regions to 3679 regions with four lazy
+sites, none of them reached; [`avx512-region-test`](../../../tools/avx512-region-test.md)'s
+`kernel3` crosses card, host, card.

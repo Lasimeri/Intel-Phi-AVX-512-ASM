@@ -33,3 +33,8 @@ read, never a signal: with a plain copy, a file mapping past its file's
 end (the executable's own, next to the heap) raised SIGBUS in 5 of 6
 runs of the seamless test at 65536 elements (2026-10-13); through
 `/proc/self/mem`, 10 of 10 ran.
+
+## `heap_bounds`
+
+The `[heap]` mapping's start and end from `/proc/self/maps` (both 0
+when there is none), for [`region.S`](region.md)'s heap walk.

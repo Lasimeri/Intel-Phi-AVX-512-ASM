@@ -50,6 +50,10 @@ struct blob {
 };
 extern uint64_t fn_scan(const void *bytes, uint64_t size, uint64_t addr, struct fn *out, const struct obj *ob, void *index);
 extern uint64_t blob_build(struct blob *bl, struct fn *fn, const void *bytes, const struct obj *ob);
+/* blob.S's lazy sites of the last build: the offset, the exit kind (10
+ * X_HOST: the host runs it; 5 X_REFUSED), the reason. */
+extern uint64_t blob_lazy_n;
+extern struct lazy { uint32_t off, kind; const char *why; } blob_lazy[];
 extern uint64_t x86_decode(const void *bytes, uint64_t avail, void *out, uint64_t addr);
 
 #define SCRATCH_TPOFF 0x1000
@@ -118,6 +122,13 @@ int main(int argc, char **argv)
 	}
 	size_t len = bl.out - bl.code;
 	printf("blob %zu bytes, %u constants, %u constant fixups, %u branch fixups\n", len, bl.nconst, bl.nfix, bl.nbrfix);
+	for (uint64_t i = 0; i < blob_lazy_n && i < 256; i++) {
+		struct { uint8_t b[72]; const struct x86_ent *ent; uint64_t pad[2]; } in;
+		uint32_t off = blob_lazy[i].off;
+		uint64_t n = x86_decode(bytes + off, s->st_size - off, &in, s->st_value + off);
+		printf("LAZY at +%u (%s): %s: %s\n", off, n && in.ent ? x86_mnem_str + x86_mnem_off[in.ent->mnem] : "?",
+			blob_lazy[i].kind == 10 ? "the host runs it" : "refused where the card reaches it", blob_lazy[i].why);
+	}
 	for (uint32_t i = 0; i < fn.ninsn; i++) {
 		const uint8_t *ix = (const uint8_t *)index + i * 16;
 		uint32_t off = *(const uint32_t *)ix;

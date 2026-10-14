@@ -162,6 +162,7 @@ int main(void)
 	check("VPU_SD_WB_BYTES", VPU_SD_WB_BYTES, 240u * 1024);
 	check("VPU_X_LOOP", VPU_X_LOOP, 6);
 	check("VPU_X_LIMIT", VPU_X_LIMIT, 8);
+	check("VPU_X_HOST", VPU_X_HOST, 10);
 	check("sizeof(vpu_slot_req)", sizeof(struct vpu_slot_req), 360);
 	check("slot_req.canary", offsetof(struct vpu_slot_req, canary), 352);
 	check("fill_off", offsetof(struct vpu_slot_req, fill_off), 336);

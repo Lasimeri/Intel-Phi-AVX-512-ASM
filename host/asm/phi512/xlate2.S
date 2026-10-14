@@ -2703,8 +2703,8 @@ xl_cvti2s:
 	R_EM em_rax
 	testl $2, %r14d
 	jz .Lci_rsx
-	cmpl $0, FRM(%rsp)
-	je .Lci_slot				# eax itself: already zero-extended in rax? no: mov eax, eax
+	# eax itself too: mov eax, eax clears rax's upper half (the program's,
+	# when rax was last written whole; 2026-10-14: the move was skipped)
 	cmpl $8, FRM(%rsp)
 	jb .Lci_rzx
 	R_BYTE $0x41

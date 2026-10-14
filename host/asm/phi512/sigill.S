@@ -25,10 +25,11 @@ need_n:	.skip MAX_CARDS * 8
 need_i:	.skip MAX_CARDS * 8
 push_q:	.skip MAX_CARDS * PUSH_MAX * PQ_BYTES
 push_n:	.skip MAX_CARDS * 8
-	.globl ymm_off, stat_calls, stat_call_ns, verbose
+	.globl ymm_off, stat_calls, stat_call_ns, verbose, heapcheck
 ymm_off:	.skip 8				# where YMM_Hi128 lies in the XSAVE area (CPUID 0xD/2 EBX)
 stat_calls:	.skip 8
 stat_call_ns:	.skip 8
+heapcheck:	.skip 8			# PHI512_HEAPCHECK: region.S walks the heap around every region
 verbose:	.skip 8
 cur_entry:	.skip 8				# the blob offset the current call enters at
 
@@ -91,6 +92,8 @@ phi512_sigill:
 	xchgq %rax, sigill_lock(%rip)		# (xchg with memory is locked)
 	testq %rax, %rax
 	jnz 97b
+	call alt_check				# on this thread's alternate stack? (one made if none)
+	movq %rax, on_alt(%rip)
 	call now_ns
 	movq %rax, 0(%rsp)
 	movq UC_GREGS + 8 * G_RIP(%rbx), %r12	# rip
@@ -919,3 +922,69 @@ w_us:
 	divq %rcx
 	movq %rax, %rdi
 	jmp w_dec
+
+	.text
+	.set ALT_BYTES, 262144
+	.set SS_ONSTACK, 1
+	.set SS_DISABLE, 2
+# alt_install: an alternate signal stack for the calling thread (256 KiB,
+# mmap'd), so the SIGILL handler (SA_ONSTACK) and the kernel's signal
+# frame are off the program's stack: the region path can then write back
+# below the frame's rsp (a region that moves rsp down, a call's stack
+# arguments: region.md). eax 0, or 1 when it could not be made.
+	.globl alt_install
+alt_install:
+	subq $40, %rsp
+	xorl %edi, %edi
+	movl $ALT_BYTES, %esi
+	movl $PROT_READ | PROT_WRITE, %edx
+	movl $MAP_PRIVATE | MAP_ANONYMOUS, %r10d
+	movq $-1, %r8
+	xorl %r9d, %r9d
+	movl $SYS_mmap, %eax
+	syscall
+	cmpq $MAP_FAILED_MAX, %rax
+	ja 8f
+	movq %rax, 0(%rsp)			# ss_sp
+	movq $0, 8(%rsp)			# ss_flags
+	movq $ALT_BYTES, 16(%rsp)		# ss_size
+	movq %rsp, %rdi
+	xorl %esi, %esi
+	movl $SYS_sigaltstack, %eax
+	syscall
+	testq %rax, %rax
+	jnz 8f
+	xorl %eax, %eax
+	addq $40, %rsp
+	ret
+8:	movl $1, %eax
+	addq $40, %rsp
+	ret
+
+# alt_check: eax 1 when this fault's handler runs on the thread's
+# alternate stack; a thread without one gets one for its next faults
+# (this one runs on the program's stack: eax 0).
+alt_check:
+	subq $40, %rsp
+	xorl %edi, %edi
+	movq %rsp, %rsi
+	movl $SYS_sigaltstack, %eax
+	syscall
+	testq %rax, %rax
+	jnz 2f
+	testl $SS_DISABLE, 8(%rsp)
+	jnz 1f
+	movl 8(%rsp), %eax
+	andl $SS_ONSTACK, %eax
+	addq $40, %rsp
+	ret
+1:	call alt_install
+2:	xorl %eax, %eax
+	addq $40, %rsp
+	ret
+
+	.bss
+	.balign 8
+	.globl on_alt
+on_alt:	.skip 8					# this fault's handler is on the alternate stack (under sigill_lock)
+	.text

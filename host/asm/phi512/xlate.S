@@ -2511,7 +2511,19 @@ xl_pinsr:
 	testl %r14d, %r14d
 	jz 1f
 	andl $1, %r15d
-1:	movzbl IN_REG(%r12), %esi
+1:	testb $H_MEM, IN_HAS(%r12)
+	jnz 11f
+	# a register source to the scratch first: the mask below goes through
+	# eax, and a source in rax read after it was the mask (2026-10-14: the
+	# CPU backend's device table, built with vpinsrq from rax, came out
+	# with 2 in it and llama-server jumped to address 2)
+	movq %rbx, %rdi
+	movzbl IN_RM(%r12), %esi
+	movl %r14d, %edx
+	movl $S_GPR, %ecx
+	movl $1, %r8d
+	call em_gpr_scratch
+11:	movzbl IN_REG(%r12), %esi
 	cmpb IN_VVVV(%r12), %sil
 	je 2f
 	movq %rbx, %rdi
@@ -2536,13 +2548,7 @@ xl_pinsr:
 	movl %r14d, %r9d
 	call em_broadcast
 	jmp 4f
-3:	movq %rbx, %rdi
-	movzbl IN_RM(%r12), %esi
-	movl %r14d, %edx
-	movl $S_GPR, %ecx
-	movl $1, %r8d
-	call em_gpr_scratch
-	movq %rbx, %rdi
+3:	movq %rbx, %rdi				# (the register went to the scratch above)
 	movzbl IN_REG(%r12), %esi
 	movl $RM_FS, %edx
 	movl $S_GPR, %ecx

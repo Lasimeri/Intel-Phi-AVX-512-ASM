@@ -27,3 +27,17 @@ sees sum 115") and its last region failed the stack canary compare; by
 the night both kernels pass whole ("PASS: every region came back
 right", 4 regions, 1 fault, 20 ms), after the REX fix of the
 scratch-register moves (commit 365d4b3).
+
+`kernel3` (2026-10-14): an EVEX load and compare (zmm16, k1), a VEX ymm
+load, `vperm2i128` (VEX, no recipe: the host runs it, blob.S's lazy
+path), then EVEX again: the card exits at it (`X_HOST`), the host runs
+it and faults into a second region at the next EVEX instruction; zmm16
+and k1 must survive the host's turn and the host's ymm3 must reach the
+card. PASS on card 0 (6 regions, one host exit).
+
+`kernel4` (2026-10-14): a vectorized function passes a 160-byte struct
+by value; gcc's `sub $0xa0,%rsp` and the zmm stores of the stack
+arguments fall inside the region, below the frame's rsp minus 128. PASS
+with the alternate signal stack and the lowered floor; with the floor's
+slack set to 0 it fails (2.65e8 for 2258) and the floor warning fires
+twice.

@@ -18,10 +18,17 @@ region_run(uc rdi, seed rsi, entry rdx) -> eax 0 (the frame is set),
    (`shadow_merge`): zmm16 to zmm31 and the masks whole; of zmm0 to
    zmm15 the upper 256 bits when the lower 256 are what the last region
    left (a VEX write on the host zeroes them otherwise).
-2. The stack: the 64 KiB units of rsp minus the red zone, of rsp and of
-   rsp plus 8 KiB made resident (`wu_ensure`), then every resident unit
-   of the mapping holding rsp floored (`wu_stack_floors`) at rsp minus
-   128, or at its end when it lies wholly below: below the frame's rsp
+2. The stack: the floor is rsp minus 128 (the red zone), and 16 KiB
+   lower (`STACK_SLACK`) when the handler runs on its alternate stack,
+   clamped to the stack mapping's start: a region may move rsp down and
+   write there (a call's stack arguments: `llama-server`'s context
+   parameters reached `llama_init_from_model` with `n_batch` 0 because
+   the line below rsp minus 128 never came back, 2026-10-14; a region
+   that ends below the floor is reported). The units of the floor, of
+   rsp minus 128, of rsp and of rsp plus 8 KiB made resident
+   (`wu_ensure`), then every resident unit of the mapping holding rsp
+   floored (`wu_stack_floors`) at the floor, or at its end when it lies
+   wholly below: below the frame's rsp
    minus the red zone the stack is the SIGILL handler's own (it has no
    alternate stack) and is never written back (`WU_LO`). A floor that
    drops marks the range between for a whole refresh (`wu_set_floor`).
@@ -79,3 +86,61 @@ stage-3 recipe gate. The silently wrong regions of the day were the
 scratch-register moves of `blob.S` and `mvex.S` with the register's
 extension in REX.B instead of REX.R (r8 to r15 moved rax), found by
 decoding a blob against the register probes.
+
+## The write-back by bytes, one snapshot (2026-10-14)
+
+A line the card changed goes back byte by byte: only the bytes where
+the card's copy differs from the shadow are written into the program
+and the shadow. `llama-server` has more threads than the one in a
+region (`common_log`'s worker, 130 in all at model loading); a whole
+line copied back undid what another thread wrote to the same line
+during the region, and glibc stopped on "corrupted double-linked list"
+where vocabulary strings shared lines with malloc's free-list links.
+The shadows of the units a `K_RESIDENT` fills come from the bytes
+staged for the card (`wu_shadows_from_stage`, called by
+`card_resident_post`), not from an earlier read: two reads differ when
+another thread writes between them. A probe counts the lines where
+memory no longer matches the shadow at the write-back
+(`stat_wb_conflicts`; under verbose a line per conflict with the
+memory, shadow and card words).
+
+A unit whose changed lines overflow the refresh list is refilled whole
+(a `K_RESIDENT` from a new read of the program's memory), and the lines
+it had already put into the list are taken back (`wu_refresh` keeps the
+list's count, bytes and last range's length at each unit's start):
+the card applies the list after the refill, so a line kept from the
+first read landed over the second while the shadow held the second,
+and the write-back put the first read's bytes back. That reverted the
+main thread's malloc metadata from a region of `common_log`'s worker
+thread (a write-back conflict of three different values, the card's
+the oldest) and glibc stopped at 11,955 regions.
+
+## The exit kind and X_HOST (2026-10-14)
+
+`.Lrg_exit` reloads the exit kind from its slot: the register held the
+reply's signal word, so every exit without a signal had been taken as a
+resume, `X_REFUSED` included. `X_HOST` (an instruction the host runs,
+[`blob.md`](blob.md)'s lazy sites) resumes like `X_JUMP`; a region whose
+exit is `X_HOST` at the very address it was posted at means the host
+faulted on that instruction too, and the program dies instead of
+looping.
+
+## The heap walk (a probe, `PHI512_HEAPCHECK=1`)
+
+`heap_walk` walks glibc's main arena from the `[heap]` mapping's start
+by the chunks' size fields (a size of at least 32, a multiple of 16,
+the next chunk within the mapping, the last ending at its end; for a
+chunk the next one marks free, that its size is the next one's
+`prev_size` and that an `fd` or `bk` inside the heap links back to it,
+glibc's "corrupted double-linked list" condition) at every region's
+start and after every write-back, and reports the first break once,
+with the check that failed and the chunk's first 64 bytes: the region's number (the n-th `region exit` line of the verbose
+log), whether native code before it or its own write-back broke the
+heap, the chunk, its size field and the chunk before. glibc finds such
+damage only when it next frees or merges the chunk. Only the main
+thread's regions walk: from another thread's handler the main thread may
+be inside malloc, and a list caught mid-update reads as broken (the
+first report, after a region of `common_log`'s worker thread, was
+that). Checked against a
+program that breaks a chunk's size natively between two regions
+("before region 2", the chunk and its field exactly).

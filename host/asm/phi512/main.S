@@ -16,6 +16,7 @@ sa:	.skip SA_BYTES
 s_env_verbose:	.asciz "PHI512_VERBOSE"
 s_env_disable:	.asciz "PHI512_DISABLE"
 s_env_handblobs: .asciz "PHI512_HANDBLOBS"
+s_env_heapcheck: .asciz "PHI512_HEAPCHECK"
 s_nocards:	.asciz "phi512: no card (no window, no worker): AVX-512 instructions will end the program"
 s_up1:	.asciz "phi512: "
 s_up2:	.asciz " card(s), the handler installed; seeds: "
@@ -59,6 +60,10 @@ phi512_init:
 	call env_set
 	movl %eax, %eax
 	movq %rax, handblobs(%rip)
+	leaq s_env_heapcheck(%rip), %rdi
+	call env_set
+	movl %eax, %eax
+	movq %rax, heapcheck(%rip)
 	movq verbose(%rip), %rax
 	testq %rax, %rax
 	jz 11f
@@ -90,10 +95,11 @@ phi512_init:
 	je 14f
 	leaq s_t4(%rip), %rsi
 	call say
-14:	leaq sa(%rip), %rbx
+14:	call alt_install			# the main thread's alternate signal stack (the others get theirs at their first fault)
+	leaq sa(%rip), %rbx
 	leaq phi512_sigill(%rip), %rax
 	movq %rax, SA_HANDLER(%rbx)
-	movq $SA_SIGINFO | SA_RESTORER, SA_FLAGS(%rbx)
+	movq $SA_SIGINFO | SA_RESTORER | SA_ONSTACK, SA_FLAGS(%rbx)
 	leaq phi512_sig_restorer(%rip), %rax
 	movq %rax, SA_RESTORER_OFF(%rbx)
 	movq $0, SA_MASK(%rbx)

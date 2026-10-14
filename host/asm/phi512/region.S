@@ -21,6 +21,7 @@
 	.include "xlate.inc"
 
 	.set WU_MAX, 1024
+	.set STACK_SLACK, 16384			# how far below rsp - 128 a region may write its stack (on the alternate stack)
 	.set WU_ADDR, 0				# the unit's address
 	.set WU_SHADOW, 8			# its shadow (64 KiB)
 	.set WU_LO, 16				# the lowest address lines are written back from (the stack unit: below the frame's rsp is the handler's own)
@@ -54,6 +55,10 @@ stat_refresh_full:	.skip 8
 	.globl refresh_n, refresh_bytes
 refresh_n:	.skip 8				# the refresh list of the next K_FEXEC: ranges, bytes (card_fexec_post consumes them)
 refresh_bytes:	.skip 8
+region_floor:	.skip 8			# this region's stack floor (region_run: rsp - 128, minus STACK_SLACK on the alternate stack)
+rf_save_n:	.skip 8				# wu_refresh: the list at the current unit's start (ranges, bytes, the last range's length)
+rf_save_bytes:	.skip 8
+rf_save_last:	.skip 8
 
 	.section .rodata
 s_rg1:	.asciz "phi512: "
@@ -89,7 +94,9 @@ s_rgv10:	.asciz ": staged vs shadow "
 s_rgv11:	.asciz " word(s) differ; staged word at the floor "
 s_rgv12:	.asciz "; before the post, staged vs memory differed in words: "
 s_rgv6:	.asciz "phi512:   shadow: "
-s_kinds: .asciz "ret\0call\0atomic\0syscall\0fault\0refused\0loop\0deferfull\0limit\0jump"
+s_rgfl:	.asciz "phi512: a region left rsp below its stack floor (its stack writes there are lost): rsp "
+s_rgfl2:	.asciz ", floor "
+s_kinds: .asciz "ret\0call\0atomic\0syscall\0fault\0refused\0loop\0deferfull\0limit\0jump\0host"
 
 	.text
 # region_run(uc rdi, seed rsi, entry rdx): eax 0 when the host can go
@@ -120,9 +127,39 @@ region_run:
 	leaq region_file(%rip), %rdi
 	call shadow_merge
 	call needs_reset
-	# the stack: the units of rsp - 128 (the red zone), rsp and rsp + 8 KiB
-	# resident, then every resident unit of the stack floored
-	# (wu_stack_floors: rsp - 128, or the end of a unit wholly below)
+	incq hw_region(%rip)
+	xorl %edi, %edi
+	call heap_walk				# (probe) native code since the last region
+	# the stack's floor: rsp - 128 (the red zone), and STACK_SLACK further
+	# down when the handler runs on its alternate stack (on_alt): the
+	# program's stack below rsp is then quiet, and a region that moves rsp
+	# down (a call's stack arguments: n_batch and n_ubatch came to
+	# llama_init_from_model as 0, 2026-10-14) writes there; clamped to the
+	# start of the stack's mapping
+	movq UC_GREGS + 8 * G_RSP(%r12), %rax
+	subq $128, %rax
+	cmpq $0, on_alt(%rip)
+	je 1f
+	subq $STACK_SLACK, %rax
+	pushq %rax
+	pushq %rax
+	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	call mapped_range
+	movq %rax, %rcx
+	popq %rax
+	popq %rax
+	cmpq %rcx, %rax
+	jae 1f
+	movq %rcx, %rax
+1:	movq %rax, region_floor(%rip)
+	movq %rax, %rdi
+	xorl %esi, %esi
+	call wu_ensure
+	testl %eax, %eax
+	jnz .Lrg_step
+	# the units of rsp - 128, rsp and rsp + 8 KiB resident, then every
+	# resident unit of the stack floored (wu_stack_floors: the floor, or
+	# the end of a unit wholly below)
 	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
 	subq $128, %rdi
 	xorl %esi, %esi
@@ -141,6 +178,7 @@ region_run:
 	testl %eax, %eax
 	jnz .Lrg_step
 	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	movq region_floor(%rip), %rsi
 	call wu_stack_floors
 	call wu_refresh
 	call resident_rounds
@@ -257,6 +295,7 @@ region_run:
 	testl %eax, %eax
 	jnz .Lrg_step
 	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	movq region_floor(%rip), %rsi
 	call wu_stack_floors			# a stack unit the fault brought in floored before any write-back
 	call resident_rounds
 	testl %eax, %eax
@@ -275,7 +314,17 @@ region_run:
 	subq (%rdx,%rcx), %r14			# the blob offset of the faulting instruction
 	jmp .Lrg_post
 .Lrg_exit:
-	cmpl $X_RET, %eax
+	movl 16(%rsp), %eax			# the exit kind (eax held the reply's signal word: before 2026-10-14 every exit without a signal was taken as a resume, X_REFUSED too)
+	cmpl $X_HOST, %eax
+	jne 3f
+	# an instruction the host runs (blob.S's lazy path); a region posted at
+	# it means the host could not run it either: the loop guard
+	movq 40(%rsp), %rcx
+	cmpq UC_GREGS + 8 * G_RIP(%r12), %rcx
+	jne 1f
+	addl $1000, %eax
+	jmp .Lrg_out
+3:	cmpl $X_RET, %eax
 	je 1f
 	cmpl $X_CALL, %eax
 	je 1f
@@ -287,6 +336,32 @@ region_run:
 	jmp .Lrg_out
 1:	call wu_writeback
 	movq %rax, 32(%rsp)
+	movl $1, %edi
+	call heap_walk				# (probe) this region's write-back
+	# a region that left rsp below its floor: what it wrote down there
+	# did not come back (said every time: a lost write)
+	movq CD_DATAP(%rbx), %rax
+	movq SD_REGS_OUT + REGS_GPR + 32(%rax), %rax
+	subq $128, %rax
+	cmpq region_floor(%rip), %rax
+	jae 51f
+	pushq %rax
+	pushq %rax
+	call l_begin
+	leaq s_rgfl(%rip), %rsi
+	call w_str
+	movq (%rsp), %rdi
+	addq $128, %rdi
+	call w_hexn
+	leaq s_rgfl2(%rip), %rsi
+	call w_str
+	movq region_floor(%rip), %rdi
+	call w_hexn
+	movl $2, %edi
+	call l_end
+	popq %rax
+	popq %rax
+51:
 	cmpq $0, verbose(%rip)
 	je 82f
 	# (probe) the general registers as the card left them
@@ -416,7 +491,7 @@ needs_reset:
 # kind_name(kind rdi): the exit kind's name.
 kind_name:
 	leaq s_kinds(%rip), %rax
-	cmpq $9, %rdi
+	cmpq $10, %rdi
 	ja 9f
 1:	testq %rdi, %rdi
 	jz 9f
@@ -568,10 +643,10 @@ wu_set_floor:
 2:	movq %rsi, WU_LO(%rdi)
 	ret
 
-# wu_stack_floors(rsp rdi): every resident unit of the mapping holding rsp
-# (the thread's stack) floored at min(rsp - 128, the unit's end): a unit
-# the region may use gets rsp - 128 (the red zone and above are the
-# program's), a unit wholly below gets its end (the SIGILL handler runs
+# wu_stack_floors(rsp rdi, floor rsi): every resident unit of the mapping
+# holding rsp (the thread's stack) floored at min(floor, the unit's end):
+# a unit the region may use gets the floor (rsp - 128, lower on the
+# alternate stack: region_run), a unit wholly below gets its end (the SIGILL handler runs
 # there, on the program's stack: a write-back into it would overwrite
 # the handler's frames). Every unit, whichever path made it resident: a
 # floor kept from an earlier region was the bug of 2026-10-14 (the unit
@@ -583,7 +658,7 @@ wu_stack_floors:
 	pushq %r13
 	pushq %r14
 	pushq %r15
-	movq %rdi, %r12
+	movq %rsi, %r12				# the floor (rdi, rsp, finds the mapping)
 	call mapped_range
 	testq %rax, %rax
 	jz 9f
@@ -599,7 +674,7 @@ wu_stack_floors:
 	leaq UNIT(%rax), %rsi			# the unit's end
 	cmpq %r13, %rsi
 	jbe 8f
-	leaq -128(%r12), %rcx
+	movq %r12, %rcx
 	cmpq %rsi, %rcx
 	jae 2f
 	movq %rcx, %rsi
@@ -632,7 +707,21 @@ wu_refresh:
 	movq wu_n(%rip), %r12
 1:	testq %r12, %r12
 	jz 9f
-	leaq stage_buf(%rip), %rdi
+	# the list's state at the unit's start: an overflow inside the unit
+	# takes back what the unit added (see .Lrf_full)
+	movq refresh_n(%rip), %rax
+	movq %rax, rf_save_n(%rip)
+	movq refresh_bytes(%rip), %rax
+	movq %rax, rf_save_bytes(%rip)
+	movq $0, rf_save_last(%rip)
+	movq refresh_n(%rip), %rax
+	testq %rax, %rax
+	jz 10f
+	shlq $4, %rax
+	movq cards + CD_DATAP(%rip), %rcx
+	movq SD_REFRESH_TAB - 16 + 8(%rcx,%rax), %rax
+	movq %rax, rf_save_last(%rip)
+10:	leaq stage_buf(%rip), %rdi
 	movq WU_ADDR(%rbx), %rsi
 	movl $UNIT, %edx
 	call copy_mapped
@@ -702,6 +791,24 @@ wu_refresh:
 	# the list is full: this unit by a DMA refill (the rest of its lines
 	# into the shadow whole), with the card's filled bit cleared
 	incq stat_refresh_full(%rip)
+	# the lines this unit already put in the list taken back: the refill
+	# below is a second read of the program's memory, and the card would
+	# apply the list's older lines over it while the shadow takes the
+	# newer ones, so the write-back would put the older bytes back (the
+	# log worker's region reverted the main thread's malloc metadata:
+	# "corrupted double-linked list", 2026-10-14)
+	movq rf_save_n(%rip), %rax
+	movq %rax, refresh_n(%rip)
+	movq rf_save_bytes(%rip), %rax
+	movq %rax, refresh_bytes(%rip)
+	movq refresh_n(%rip), %rax
+	testq %rax, %rax
+	jz 11f
+	shlq $4, %rax
+	movq cards + CD_DATAP(%rip), %rcx
+	movq rf_save_last(%rip), %rdx
+	movq %rdx, SD_REFRESH_TAB - 16 + 8(%rcx,%rax)
+11:
 	movq WU_SHADOW(%rbx), %rdi
 	leaq stage_buf(%rip), %rsi
 	movl $UNIT, %edx
@@ -862,15 +969,58 @@ wu_writeback:
 	cmpl $8, %ecx
 	jb 4b
 	jmp 5f
-41:	# changed: the whole line copied to memory and the shadow
+41:	# changed: the bytes the card changed, alone, to memory and the shadow
+	# (2026-10-14: the whole line was copied, and another thread's writes
+	# to the line during the region were undone)
 	leaq (%r9,%r10), %r11
 	movq WU_ADDR(%rbx), %rdi
 	addq %r11, %rdi
+	# (probe) a conflict: memory no longer the shadow (the snapshot the card
+	# started from) in a line the card changed: written meanwhile by
+	# another thread
 	xorl %ecx, %ecx
+44:	movq (%rdi,%rcx), %rax
+	leaq (%rdx,%r11), %r8
+	cmpq (%r8,%rcx), %rax
+	jne 45f
+	addq $8, %rcx
+	cmpl $64, %ecx
+	jb 44b
+	jmp 46f
+45:	incq stat_wb_conflicts(%rip)
+	cmpq $0, verbose(%rip)
+	je 46f
+	pushq %rdx
+	pushq %rdi
+	pushq %r9
+	pushq %r10
+	pushq %r11
+	pushq %r11
+	leaq (%rdx,%r11), %rsi
+	leaq (%r13,%r11), %rdx
+	call wb_conflict_print
+	popq %r11
+	popq %r11
+	popq %r10
+	popq %r9
+	popq %rdi
+	popq %rdx
+46:	xorl %ecx, %ecx
 42:	movq (%r13,%r11), %rax
-	movq %rax, (%rdi,%rcx)
-	movq %rax, (%rdx,%r11)
-	addq $8, %r11
+	cmpq (%rdx,%r11), %rax
+	je 47f
+	xorl %r8d, %r8d
+48:	leaq (%r11,%r8), %rsi
+	movb (%r13,%rsi), %al
+	cmpb (%rdx,%rsi), %al
+	je 49f
+	movb %al, (%rdx,%rsi)			# the shadow's byte
+	leaq (%rdi,%rcx), %rsi
+	movb %al, (%rsi,%r8)			# the program's byte
+49:	incl %r8d
+	cmpl $8, %r8d
+	jb 48b
+47:	addq $8, %r11
 	addq $8, %rcx
 	cmpl $64, %ecx
 	jb 42b
@@ -1250,3 +1400,289 @@ wu_verify:
 	popq %r12
 	popq %rbx
 9:	ret
+
+	.text
+# heap_walk(when edi: 0 at a region's start, 1 after its write-back): a
+# probe (PHI512_HEAPCHECK=1). The main arena's heap is walked chunk by
+# chunk from the [heap] mapping's start by the size fields (glibc's
+# malloc chunk: prev_size, then size with three flag bits; the next chunk
+# at chunk + size; the top chunk ends at the mapping's end), and the
+# first walk that breaks (a size below 32 or not a multiple of 16, a
+# chunk past the end) is reported once: the region's number (region_run
+# calls so far, the n-th "region exit" line of the verbose log), before
+# its start (native code since the last region broke it) or after its
+# write-back (the region did), the bad chunk, its size field and the
+# chunk before it. glibc itself finds such damage only when it next
+# frees or merges that chunk, thousands of regions later.
+heap_walk:
+	cmpq $0, heapcheck(%rip)
+	je 99f
+	cmpq $0, hw_reported(%rip)
+	jne 99f
+	# the main thread's regions only: from another thread's handler the main
+	# thread may be inside malloc, and a list caught mid-update reads as
+	# broken (a report after common_log's worker's region, 2026-10-14)
+	movl $186, %eax				# gettid
+	syscall
+	pushq %rax
+	movl $39, %eax				# getpid
+	syscall
+	popq %rcx
+	cmpl %eax, %ecx
+	jne 99f
+	pushq %rbx
+	pushq %rbp
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	subq $24, %rsp				# 0 the heap's start, 8 the reason
+	movl %edi, %r15d
+	call heap_bounds
+	testq %rax, %rax
+	jz 9f
+	movq %rax, 0(%rsp)
+	leaq s_hw_rsize(%rip), %rcx
+	movq %rcx, 8(%rsp)
+	movq %rax, %rbx				# the chunk
+	movq %rdx, %r12				# the heap's end
+	xorl %r13d, %r13d			# chunks walked
+	xorl %ebp, %ebp				# the chunk before
+1:	leaq 16(%rbx), %rax
+	cmpq %r12, %rax
+	ja 8f
+	movq 8(%rbx), %r14
+	andq $-8, %r14
+	cmpq $32, %r14
+	jb 8f
+	testq $15, %r14
+	jnz 8f
+	leaq (%rbx,%r14), %rax
+	cmpq %r12, %rax
+	ja 8f
+	# a chunk the next one marks free (PREV_INUSE clear) is in a bin: its
+	# size in the next one's prev_size, its fd and bk linked back to it
+	leaq 16(%rax), %rcx
+	cmpq %r12, %rcx
+	ja 2f					# the top chunk: no next
+	testq $1, 8(%rax)
+	jnz 2f
+	leaq s_hw_rprev(%rip), %rcx
+	movq %rcx, 8(%rsp)
+	cmpq %r14, (%rax)
+	jne 8f
+	leaq s_hw_rfd(%rip), %rcx
+	movq %rcx, 8(%rsp)
+	movq 16(%rbx), %rcx			# fd
+	cmpq 0(%rsp), %rcx
+	jb 21f
+	leaq 32(%rcx), %rdx
+	cmpq %r12, %rdx
+	ja 21f
+	cmpq %rbx, 24(%rcx)			# fd->bk
+	jne 8f
+21:	leaq s_hw_rbk(%rip), %rcx
+	movq %rcx, 8(%rsp)
+	movq 24(%rbx), %rcx			# bk
+	cmpq 0(%rsp), %rcx
+	jb 22f
+	leaq 32(%rcx), %rdx
+	cmpq %r12, %rdx
+	ja 22f
+	cmpq %rbx, 16(%rcx)			# bk->fd
+	jne 8f
+22:	leaq s_hw_rsize(%rip), %rcx
+	movq %rcx, 8(%rsp)
+2:	incq %r13
+	movq %rbx, %rbp
+	movq %rax, %rbx
+	cmpq %r12, %rbx
+	jb 1b
+	jmp 9f
+8:	movq $1, hw_reported(%rip)
+	call l_begin
+	leaq s_hw1(%rip), %rsi
+	call w_str
+	movq 8(%rsp), %rsi
+	call w_str
+	leaq s_hw_before(%rip), %rsi
+	testl %r15d, %r15d
+	jz 81f
+	leaq s_hw_after(%rip), %rsi
+81:	call w_str
+	movq hw_region(%rip), %rdi
+	call w_dec
+	leaq s_hw3(%rip), %rsi
+	call w_str
+	movq %rbx, %rdi
+	call w_hexn
+	leaq s_hw4(%rip), %rsi
+	call w_str
+	xorl %edi, %edi
+	leaq 16(%rbx), %rax
+	cmpq %r12, %rax
+	ja 82f
+	movq 8(%rbx), %rdi
+82:	call w_hexn
+	leaq s_hw5(%rip), %rsi
+	call w_str
+	movq %rbp, %rdi
+	call w_hexn
+	leaq s_hw6(%rip), %rsi
+	call w_str
+	movq %r13, %rdi
+	call w_dec
+	leaq s_hw7(%rip), %rsi
+	call w_str
+	movq %r12, %rdi
+	call w_hexn
+	movl $2, %edi
+	call l_end
+	# the chunk's first 64 bytes
+	leaq 64(%rbx), %rax
+	cmpq %r12, %rax
+	ja 9f
+	call l_begin
+	leaq s_hw8(%rip), %rsi
+	call w_str
+	xorl %r13d, %r13d
+83:	movq (%rbx,%r13,8), %rdi
+	call w_hexn
+	leaq s_hw6(%rip), %rsi
+	call w_str
+	incl %r13d
+	cmpl $8, %r13d
+	jb 83b
+	movl $2, %edi
+	call l_end
+9:	addq $24, %rsp
+	popq %r15
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbp
+	popq %rbx
+99:	ret
+	.section .rodata
+s_hw1:	.asciz "phi512: HEAP WALK BROKE ("
+s_hw_rsize:	.asciz "a size field) "
+s_hw_rprev:	.asciz "a free chunk's size not in the next one's prev_size) "
+s_hw_rfd:	.asciz "a free chunk's fd->bk not back to it) "
+s_hw_rbk:	.asciz "a free chunk's bk->fd not back to it) "
+s_hw8:	.asciz "phi512:   the chunk: "
+s_hw_before:	.asciz "before region "
+s_hw_after:	.asciz "after the write-back of region "
+s_hw3:	.asciz ": chunk "
+s_hw4:	.asciz " size field "
+s_hw5:	.asciz ", the chunk before "
+s_hw6:	.asciz ", "
+s_hw7:	.asciz " chunks walked, heap end "
+	.bss
+	.balign 8
+hw_region:	.skip 8
+hw_reported:	.skip 8
+	.text
+
+	.text
+# wb_conflict_print(memory line rdi, shadow line rsi, card line rdx): a
+# probe line for a write-back conflict: the words where memory is no
+# longer the shadow, with the card's.
+wb_conflict_print:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	subq $8, %rsp
+	movq %rdi, %rbx
+	movq %rsi, %r12
+	movq %rdx, %r13
+	call l_begin
+	leaq s_wc1(%rip), %rsi
+	call w_str
+	movq %rbx, %rdi
+	call w_hexn
+	xorl %r14d, %r14d
+1:	movq (%rbx,%r14,8), %rax
+	cmpq (%r12,%r14,8), %rax
+	je 2f
+	leaq s_wc2(%rip), %rsi
+	call w_str
+	movq %r14, %rdi
+	call w_dec
+	leaq s_wc3(%rip), %rsi
+	call w_str
+	movq (%rbx,%r14,8), %rdi
+	call w_hexn
+	leaq s_wc4(%rip), %rsi
+	call w_str
+	movq (%r12,%r14,8), %rdi
+	call w_hexn
+	leaq s_wc5(%rip), %rsi
+	call w_str
+	movq (%r13,%r14,8), %rdi
+	call w_hexn
+2:	incl %r14d
+	cmpl $8, %r14d
+	jb 1b
+	movl $2, %edi
+	call l_end
+	addq $8, %rsp
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# wu_shadows_from_stage(chunk rdi, units esi, the staging slot's bytes
+# rdx): every unit of the mask that the region path tracks gets its
+# shadow from the bytes staged for the card (card.S's
+# card_resident_post), so the card and the shadow start from one
+# snapshot: a second read of the program's memory differs when another
+# thread writes it between the reads, and the write-back then took the
+# difference for the card's.
+	.globl wu_shadows_from_stage
+wu_shadows_from_stage:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	subq $8, %rsp
+	movq %rdi, %r12
+	movl %esi, %r13d
+	movq %rdx, %r14
+	xorl %ebx, %ebx
+1:	cmpl $32, %ebx
+	jae 9f
+	btl %ebx, %r13d
+	jnc 2f
+	movq %rbx, %rdi
+	shlq $16, %rdi
+	addq %r12, %rdi
+	call wu_find
+	testq %rax, %rax
+	jz 2f
+	movq WU_SHADOW(%rax), %rdi
+	movq %rbx, %rsi
+	shlq $16, %rsi
+	addq %r14, %rsi
+	movl $UNIT, %edx
+	call mem_copy
+2:	incl %ebx
+	jmp 1b
+9:	addq $8, %rsp
+	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+	.section .rodata
+s_wc1:	.asciz "phi512:   wb conflict at "
+s_wc2:	.asciz "; word "
+s_wc3:	.asciz " memory "
+s_wc4:	.asciz " shadow "
+s_wc5:	.asciz " card "
+	.bss
+	.balign 8
+	.globl stat_wb_conflicts
+stat_wb_conflicts:	.skip 8
+	.text

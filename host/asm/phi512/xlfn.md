@@ -28,3 +28,7 @@ every size, the first call of each including its translation and the
 four loads (65536 integers: 1.81 ms against 0.82 with the hand blob;
 at 1M and 16M the two are equal within the noise):
 [`docs/results/2026-10-13-translator-seamless.md`](../../../docs/results/2026-10-13-translator-seamless.md).
+
+Under `PHI512_VERBOSE` a translation also prints a line per lazy site
+([`blob.md`](blob.md), "Lazy sites"): `lazy site at +OFF: the host runs
+it: REASON` or `: refused where the card reaches it: REASON`.

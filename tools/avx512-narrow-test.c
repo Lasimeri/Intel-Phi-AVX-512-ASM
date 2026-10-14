@@ -156,6 +156,18 @@ int main(void)
         asm volatile("vmovups %1, %%zmm16\n\t%{evex%} vmovq %%xmm16, %%rax\n\tmov %%rax, %0" : "=m"(got) : "m"(c) : "xmm16", "rax", "memory");
         check_u64("vmovq xmm, rax", got, c.q[0]);
     }
+    /* vpinsrq from rax, EVEX and VEX (2026-10-14: the recipe set its lane
+     * mask through eax before reading rax, so the element was the mask:
+     * the CPU backend's device table came out with 2 in it) */
+    ASM("vmovups %1, %%zmm16\n\tmovabs $0x1122334455667788, %%rax\n\tvpinsrq $1, %%rax, %%xmm16, %%xmm17\n\tvmovups %%zmm17, %0", r, "m"(a));
+    memset(&w, 0, sizeof w);
+    w.q[0] = a.q[0];
+    w.q[1] = 0x1122334455667788ull;
+    check("vpinsrq $1, rax (EVEX)", &r, &w, 16);
+    /* the EVEX move first: the region starts there, so the card runs the VEX
+     * form too (a block that starts with VEX runs it on the host) */
+    asm volatile("vmovups %1, %%zmm16\n\tvmovdqu %1, %%xmm1\n\tmovabs $0x1122334455667788, %%rax\n\tvpinsrq $1, %%rax, %%xmm1, %%xmm2\n\tvmovups %%zmm2, %0" : "=m"(r) : "m"(a) : "xmm1", "xmm2", "xmm16", "rax", "memory");
+    check("vpinsrq $1, rax (VEX)", &r, &w, 16);
     ASM("%{evex%} vmovq %1, %%xmm16\n\tvmovups %%zmm16, %0", r, "m"(c.q[2]));
     memset(&w, 0, sizeof w);
     w.q[0] = c.q[2];
@@ -437,6 +449,13 @@ int main(void)
         ((double *)w.q)[0] = (double)0xf0000001u;
         w.q[1] = a.q[1];
         check("vcvtusi2sd eax (unsigned)", &r, &w, 16);
+        /* rax's upper half set: the source is eax alone (2026-10-14: the
+         * recipe converted all of rax when the register was eax) */
+        ASM("vmovups %1, %%zmm16\n\tmov $-1, %%rax\n\t%{evex%} vcvtusi2sd %%eax, %%xmm16, %%xmm17\n\tvmovups %%zmm17, %0", r, "m"(a));
+        memset(&w, 0, sizeof w);
+        ((double *)w.q)[0] = (double)0xffffffffu;
+        w.q[1] = a.q[1];
+        check("vcvtusi2sd eax (rax upper half set)", &r, &w, 16);
         ASM("vmovups %1, %%zmm16\n\tmov $16777217, %%eax\n\t%{evex%} vcvtsi2ss %%eax, %%xmm16, %%xmm17\n\tvmovups %%zmm17, %0", r, "m"(a));
         memset(&w, 0, sizeof w);
         w.f[0] = (float)16777217;

@@ -29,6 +29,7 @@ s_loop:		.asciz "a loop or jrcxz instruction (rel8 only) is not re-laid out yet"
 s_noscratch:	.asciz "no general register free for a rip-relative operand"
 s_sse:		.asciz "a legacy SSE instruction (the card has none) is not translated yet"
 s_x87:		.asciz "an x87 instruction"
+s_lock:		.asciz "a locked instruction (atomic on the program's memory: the host's)"
 s_badmap:	.asciz "a branch target without a map entry"
 
 	.text
@@ -40,7 +41,10 @@ s_badmap:	.asciz "a branch target without a map entry"
 	.set F_OB, IN_BYTES + 8			# the object
 	.set F_SCR, IN_BYTES + 16		# the scratch register of a re-based operand (-1 none); +8 a slot number
 	.set F_CMOV, IN_BYTES + 32		# a CMOV: the blob address after its jcc's rel8 (0 none)
-	.set F_BYTES, IN_BYTES + 48
+	.set F_WHY, IN_BYTES + 40		# a lazy site's reason
+	.set F_SNAP, IN_BYTES + 48		# the counts at the instruction's start: constants, fixups, branch fixups (u32 each)
+	.set F_KIND, IN_BYTES + 60		# a lazy site's exit kind
+	.set F_BYTES, IN_BYTES + 64
 
 	.globl blob_build
 blob_build:
@@ -59,6 +63,7 @@ blob_build:
 	movl $0, BL_NCONST(%rbx)
 	movl $0, BL_NFIX(%rbx)
 	movl $0, BL_NBRFIX(%rbx)
+	movq $0, blob_lazy_n(%rip)
 	movq BL_CODE(%rbx), %rax
 	movq %rax, BL_OUT(%rbx)
 	movl FN_NINSN(%r12), %r15d
@@ -75,6 +80,12 @@ blob_build:
 	movq BL_OUT(%rbx), %rdx
 	subq BL_CODE(%rbx), %rdx
 	movl %edx, (%rcx,%rax,4)
+	movl BL_NCONST(%rbx), %eax		# the counts, for a lazy site's rollback
+	movl %eax, F_SNAP(%rsp)
+	movl BL_NFIX(%rbx), %eax
+	movl %eax, F_SNAP + 4(%rsp)
+	movl BL_NBRFIX(%rbx), %eax
+	movl %eax, F_SNAP + 8(%rsp)
 	movl IX_OFF(%r14), %eax
 	leaq (%r13,%rax), %rdi
 	movzbl IX_LEN(%r14), %esi
@@ -118,7 +129,23 @@ blob_build:
 # now; a rip-relative operand is re-based.
 .Lcopy:
 	leaq F_IN(%rsp), %rdx
+	# an atomic on the program's memory (a lock prefix; xchg with memory,
+	# locked without one) is the host's: on the card it would be atomic on
+	# the card's copy alone, and the program's other threads would lose
+	# their updates to the word (2026-10-14)
+	testb $IXF_LOCK, IX_FLAGS(%r14)
+	jnz .Lref_lock
 	cmpb $0, IN_ENC(%rdx)
+	jne 15f
+	cmpb $0, IN_MAP(%rdx)
+	jne 15f
+	movzbl IN_OP(%rdx), %eax
+	andl $0xfe, %eax
+	cmpl $0x86, %eax
+	jne 15f
+	testb $H_MEM, IN_HAS(%rdx)
+	jnz .Lref_lock
+15:	cmpb $0, IN_ENC(%rdx)
 	jne 1f
 	cmpb $0, IN_MAP(%rdx)
 	je 2f
@@ -392,7 +419,7 @@ blob_build:
 	leaq F_IN(%rsp), %rsi
 	call xl_insn
 	testq %rax, %rax
-	jnz .Lrefuse
+	jnz .Llazy
 	cmpl $0, F_SCR(%rsp)
 	jl .Ladvance
 	call .Lrip_epilogue
@@ -781,6 +808,57 @@ blob_build:
 	xorl %eax, %eax
 	jmp .Lout
 
+# A lazy site (2026-10-14): an instruction the blob cannot carry (no
+# recipe, a legacy SSE or x87 form, a loop instruction, no scratch
+# register) becomes an exit at its own address instead of refusing the
+# whole function: X_HOST when the host runs it (lazy_host_ok: not EVEX,
+# not a VEX form the EPYC 7742 lacks), so the host executes it and goes
+# on natively to the next fault; X_REFUSED for the rest, so the program
+# dies there only if the card reaches it. What the path emitted before
+# refusing is rolled back to the instruction's start (its map entry) with
+# the counts of constants, fixups and branch fixups; the site goes into
+# blob_lazy for the translation's log.
+.Llazy:
+	movq %rax, F_WHY(%rsp)
+	movq BL_MAP(%rbx), %rcx
+	movq F_I(%rsp), %rax
+	movl (%rcx,%rax,4), %edx
+	addq BL_CODE(%rbx), %rdx
+	movq %rdx, BL_OUT(%rbx)
+	movl F_SNAP(%rsp), %eax
+	movl %eax, BL_NCONST(%rbx)
+	movl F_SNAP + 4(%rsp), %eax
+	movl %eax, BL_NFIX(%rbx)
+	movl F_SNAP + 8(%rsp), %eax
+	movl %eax, BL_NBRFIX(%rbx)
+	leaq F_IN(%rsp), %rdi
+	call lazy_host_ok
+	movl $X_REFUSED, %ecx
+	testl %eax, %eax
+	jz 1f
+	movl $X_HOST, %ecx
+1:	movl %ecx, F_KIND(%rsp)
+	movq blob_lazy_n(%rip), %rax
+	cmpq $LAZY_MAX, %rax
+	jae 2f
+	shlq $4, %rax
+	leaq blob_lazy(%rip), %rdx
+	addq %rax, %rdx
+	movl IX_OFF(%r14), %eax
+	movl %eax, 0(%rdx)
+	movl %ecx, 4(%rdx)
+	movq F_WHY(%rsp), %rax
+	movq %rax, 8(%rdx)
+2:	incq blob_lazy_n(%rip)
+	movl IX_OFF(%r14), %eax
+	addq FN_ADDR(%r12), %rax		# the instruction's own address
+	movl $S_SITE, %ecx
+	call .Lseq_slot
+	movl F_KIND(%rsp), %eax
+	call .Lseq_kind
+	call .Lseq_jmp
+	jmp .Ladvance
+
 .Lref_decode:	leaq s_decode(%rip), %rax
 	jmp .Lrefuse
 .Lref_badkind:	leaq s_badkind(%rip), %rax
@@ -788,13 +866,15 @@ blob_build:
 .Lref_room:	leaq s_room(%rip), %rax
 	jmp .Lrefuse
 .Lref_loop:	leaq s_loop(%rip), %rax
-	jmp .Lrefuse
+	jmp .Llazy
 .Lref_noscratch: leaq s_noscratch(%rip), %rax
-	jmp .Lrefuse
+	jmp .Llazy
 .Lref_sse:	leaq s_sse(%rip), %rax
-	jmp .Lrefuse
+	jmp .Llazy
 .Lref_x87:	leaq s_x87(%rip), %rax
-	jmp .Lrefuse
+	jmp .Llazy
+.Lref_lock:	leaq s_lock(%rip), %rax
+	jmp .Llazy
 .Lref_badmap:	leaq s_badmap(%rip), %rax
 .Lrefuse:
 	movq %rax, BL_REFUSED(%rbx)
@@ -1021,3 +1101,87 @@ blob_build:
 
 	.bss
 scr_vector:	.skip 8			# 1 while .Lscratch_gpr serves a re-encoded vector instruction (r8 and up whatever the original's encoding)
+
+	.text
+# lazy_host_ok(in rdi): eax 1 when the host (AMD EPYC 7742, Zen 2:
+# /proc/cpuinfo has avx avx2 fma f16c bmi1 bmi2 abm adx aes pclmulqdq
+# sha_ni, no avx512*, vaes, vpclmulqdq, gfni, avx_vnni) runs the
+# instruction itself: a legacy form, or a VEX form that is not one of
+# the AVX-512 opmask instructions (VEX-encoded, AVX-512F/BW/DQ: 0F 41 to
+# 4B, 90 to 93, 98, 99; 0F3A 30 to 33) nor a VEX form of a feature this
+# host lacks (0F38 50 to 53 AVX-VNNI, 72 B0 B1 AVX-NE-CONVERT, 49 4B 5C
+# 5E AMX, B4 B5 AVX-IFMA, CB to CD SHA512, CF GFNI, D2 D3 VNNI-INT16, DA
+# SM3/SM4, DC to DF with L 1 VAES, E0 to EF CMPccXADD; 0F3A CE CF GFNI,
+# 44 with L 1 VPCLMULQDQ). An EVEX form never. A form missed here is
+# caught by region.S's loop guard (a region posted at an X_HOST site).
+	.globl lazy_host_ok
+lazy_host_ok:
+	movzbl IN_ENC(%rdi), %eax
+	cmpl $2, %eax
+	je 8f
+	cmpl $1, %eax
+	jne 7f
+	movzbl IN_MAP(%rdi), %ecx
+	movzbl IN_OP(%rdi), %edx
+	cmpl $1, %ecx
+	jne 2f
+	cmpl $0x41, %edx
+	jb 7f
+	cmpl $0x4b, %edx
+	jbe 8f
+	cmpl $0x90, %edx
+	jb 7f
+	cmpl $0x93, %edx
+	jbe 8f
+	cmpl $0x98, %edx
+	je 8f
+	cmpl $0x99, %edx
+	je 8f
+	jmp 7f
+2:	cmpl $2, %ecx
+	jne 3f
+	leaq .Llz_38(%rip), %rcx
+21:	movzbl (%rcx), %eax
+	testl %eax, %eax
+	jz 22f
+	cmpl %eax, %edx
+	je 8f
+	incq %rcx
+	jmp 21b
+22:	cmpl $0xe0, %edx
+	jb 23f
+	cmpl $0xef, %edx
+	jbe 8f
+23:	cmpl $0xdc, %edx
+	jb 7f
+	cmpl $0xdf, %edx
+	ja 7f
+	cmpb $0, IN_L(%rdi)
+	jne 8f
+	jmp 7f
+3:	cmpl $3, %ecx
+	jne 7f
+	cmpl $0x30, %edx
+	jb 31f
+	cmpl $0x33, %edx
+	jbe 8f
+31:	cmpl $0xce, %edx
+	je 8f
+	cmpl $0xcf, %edx
+	je 8f
+	cmpl $0x44, %edx
+	jne 7f
+	cmpb $0, IN_L(%rdi)
+	jne 8f
+7:	movl $1, %eax
+	ret
+8:	xorl %eax, %eax
+	ret
+	.section .rodata
+.Llz_38:	.byte 0x50, 0x51, 0x52, 0x53, 0x72, 0xb0, 0xb1, 0x49, 0x4b, 0x5c, 0x5e, 0xb4, 0xb5, 0xcb, 0xcc, 0xcd, 0xcf, 0xd2, 0xd3, 0xda, 0
+	.bss
+	.balign 8
+	.globl blob_lazy_n, blob_lazy
+blob_lazy_n:	.skip 8			# the lazy sites of the last blob_build (blob_lazy holds the first LAZY_MAX)
+blob_lazy:	.skip LAZY_MAX * 16
+	.text

@@ -47,6 +47,19 @@ memory operand, vvvv, the mask, zeroing, broadcast, the vector length
 A mnemonic without a recipe refuses the function ("no recipe for this
 instruction"); the refusal names the instruction's offset.
 
+## A program register read after a transient (2026-10-14)
+
+The emitter takes rax and rcx as transients (a mask immediate goes
+through eax, an address through rcx), saving the program's values in
+the scratch first (`EU_RAX`, `EU_RCX`); a memory operand gets them back
+(`em_mvex` calls `em_addr_regs`), a register operand does not. So a
+recipe stores a general-register source before anything that takes
+rax or rcx: `xl_pinsr` set its lane mask first, and `vpinsrq $1, rax`
+inserted the mask (2). In `llama-server`, `ggml_backend_cpu_reg_get_device`
+builds the CPU device's function table with `vpinsrq` from rax: two
+entries came out as 2 and the host jumped to address 2 at region 3679.
+Audited: every other store of a program register comes first.
+
 ## Measured (2026-10-13, four cards)
 
 `tools/avx512-seamless-test.c`'s three kernels from automatic

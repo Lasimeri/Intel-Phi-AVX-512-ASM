@@ -105,6 +105,13 @@ copy from the staging slot, 0 bytes = the page alone) and, for `K_PUSH`,
 host reads them out of `RESIDENT + entry x 2 MiB`. The request is 352
 bytes. The SLOTSEQ word: `kind << 11 | seq & 0x7ff` (2026-10-13).
 
+## X_HOST (2026-10-14)
+
+`VPU_X_HOST` (10): an instruction the host runs itself. The blob's lazy
+path ([`blob.md`](../../host/asm/phi512/blob.md)) exits with it at the
+instruction's own address; the card passes the kind through like any
+exit stub's, the host resumes there as for `VPU_X_JUMP`.
+
 ## The translated code's scratch (2026-10-13, later)
 
 `VPU_FX_SCRATCH_TPOFF` (1536) and `VPU_FX_SCRATCH_BYTES` (512): the

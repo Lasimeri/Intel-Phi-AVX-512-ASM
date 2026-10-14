@@ -84,6 +84,66 @@ static float kernel2_ref(const float *x, float *y, int n, fn_t f)
     return y[n - 1];
 }
 
+/* kernel3: a region broken by an instruction the card has no recipe for
+ * and the host runs itself (vperm2i128: VEX, AVX2): the card runs to it
+ * and exits (X_HOST, blob.S's lazy path), the host executes it and goes
+ * on natively until the next EVEX instruction faults into a new region.
+ * zmm16 and k1, set on the card and never touched by the host, must come
+ * through; the host's ymm3 must reach the card; the card's ymm2 must
+ * reach the host. */
+__attribute__((noinline))
+static void kernel3(const float *x, float *out)
+{
+    __asm__ volatile(
+        "vmovups (%0), %%zmm16\n\t"
+        "vcmpps $1, 64(%0), %%zmm16, %%k1\n\t"
+        "vmovups 128(%0), %%ymm2\n\t"
+        "vperm2i128 $0x01, %%ymm2, %%ymm2, %%ymm3\n\t"
+        "vaddps %%zmm16, %%zmm16, %%zmm17%{%%k1%}%{z%}\n\t"
+        "vmovups %%zmm17, (%1)\n\t"
+        "vmovups %%zmm3, 64(%1)\n\t"
+        : : "r"(x), "r"(out) : "xmm2", "xmm3", "xmm16", "xmm17", "k1", "memory");
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static void kernel3_ref(const float *x, float *out)
+{
+    for (int i = 0; i < 16; i++) out[i] = x[i] < x[16 + i] ? 2.0f * x[i] : 0.0f;
+    for (int j = 0; j < 4; j++) { out[16 + j] = x[36 + j]; out[20 + j] = x[32 + j]; }
+    for (int j = 24; j < 32; j++) out[j] = 0.0f;
+}
+
+/* kernel4: a region that moves rsp down: a 160-byte struct passed by value
+ * is built with zmm moves and copied to the call's stack arguments below
+ * the frame (gcc: sub rsp, then the stores, inside the region). Before
+ * 2026-10-14 the lines below rsp - 128 never came back (llama-server's
+ * context parameters reached llama_init_from_model with n_batch 0). */
+struct big { float v[40]; };
+
+__attribute__((noinline, target("no-avx512f")))
+static float take_big(struct big b)
+{
+    float s = 0.0f;
+    for (int i = 0; i < 40; i++) s += b.v[i] * (float)(i + 1);
+    return s;
+}
+
+__attribute__((noinline))
+static float kernel4(const float *x)
+{
+    struct big b;
+    for (int i = 0; i < 40; i++) b.v[i] = x[i] * 2.0f + 1.0f;
+    return take_big(b);
+}
+
+__attribute__((noinline, target("no-avx512f")))
+static float kernel4_ref(const float *x)
+{
+    struct big b;
+    for (int i = 0; i < 40; i++) b.v[i] = x[i] * 2.0f + 1.0f;
+    return take_big(b);
+}
+
 /* main itself has no AVX-512 code: the inputs come from a scalar helper
  * (gcc would vectorise the loop in main with forms the kernels never
  * use). */
@@ -107,6 +167,18 @@ int main(void)
     float want2 = kernel2_ref(x, y2, 256, leaf);
     if (r2 != want2 || memcmp(y1, y2, sizeof y1)) { printf("FAIL kernel2: got %g want %g, arrays %s\n", r2, want2, memcmp(y1, y2, sizeof y1) ? "differ" : "equal"); fails++; }
     else printf("ok   kernel2 (%g)\n", r2);
+    static float o1[32] __attribute__((aligned(64))), o2[32] __attribute__((aligned(64)));
+    kernel3(x, o1);
+    kernel3_ref(x, o2);
+    if (memcmp(o1, o2, sizeof o1)) {
+        printf("FAIL kernel3:");
+        for (int i = 0; i < 32; i++) if (o1[i] != o2[i]) printf(" [%d] %g want %g", i, o1[i], o2[i]);
+        printf("\n");
+        fails++;
+    } else printf("ok   kernel3 (a VEX instruction the host runs between two card regions)\n");
+    float r4 = kernel4(x), want4 = kernel4_ref(x);
+    if (r4 != want4) { printf("FAIL kernel4: got %g want %g\n", r4, want4); fails++; }
+    else printf("ok   kernel4 (stack arguments written below the frame by the region: %g)\n", r4);
     printf("%s\n", fails ? "FAIL" : "PASS: every region came back right");
     return fails != 0;
 }

@@ -21,3 +21,9 @@ constant (0x1000) for reading.
 128, 896 and 320 bytes; it is how the SIB-index bug and the extract's
 operand order were found before the card ran them
 ([`../docs/results/2026-10-13-translator-seamless.md`](../docs/results/2026-10-13-translator-seamless.md)).
+
+Lazy sites (2026-10-14): after the blob line, one line per site,
+`LAZY at +OFF (Mnemonic): the host runs it|refused where the card
+reaches it: REASON` (`blob_lazy` of [`blob.S`](../host/asm/phi512/blob.md)).
+Its stub decodes with `od` from the written blob at the site's map
+offset: the slot write of the address, the kind, the jump.

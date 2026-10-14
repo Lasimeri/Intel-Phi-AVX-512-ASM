@@ -56,3 +56,14 @@ registers are now loaded after the restores), and, after fifty regions,
 two lanes of a result silently lost: a chunk kept mapped and writable
 from a ranges-mode region gave a later demand-mode region stale reads
 and unsnapshotted writes (`card/vpu/vpu_exec.md`).
+
+## Added 2026-10-14 (69 checks)
+
+`vpinsrq $1, rax` in its EVEX and VEX forms and `vcvtusi2sd eax` with
+rax's upper half set: the recipes read rax after their own mask had
+gone through eax (the element was the mask) and converted all of rax
+for a 32-bit source. With the fixes stashed the three fail (66 of 69,
+the element read back as 2); with them 69 of 69. A VEX check starts
+with an EVEX instruction: a block that begins with VEX runs it on the
+host (no fault until the first EVEX instruction), and tests nothing on
+the card.

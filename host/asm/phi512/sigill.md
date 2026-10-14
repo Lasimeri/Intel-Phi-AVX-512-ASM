@@ -48,7 +48,11 @@ the card's own compute per request 0.04 to 0.6 ms.
 ## Limits today
 
 The handler runs on the faulting thread's stack (no altstack yet), one
-call at a time: `sigill_lock` (a test-and-test-and-set spin taken after
+call at a time, on an alternate signal stack (2026-10-14: `SA_ONSTACK`,
+`alt_install` for the main thread in the constructor and for any other
+thread at its first fault, which itself still runs on the program's
+stack; `alt_check` tells the region path, `on_alt`, so it may write
+back below the frame's rsp: [`region.md`](region.md)). `sigill_lock` (a test-and-test-and-set spin taken after
 the prologue, released at `.Lout`, where every path ends) serializes the
 threads, since the translation, the region path ([`region.md`](region.md):
 the units, the refresh list, `region_file`), the register file in `.bss`

@@ -99,6 +99,7 @@
 	.set BL_REFUSED_OFF, 104		# u32: the instruction's offset in the function
 	.set BL_SCRATCH, 108			# i32: the scratch area's fs offset
 	.set BL_BYTES, 128
+	.set LAZY_MAX, 256			# blob.S's lazy sites recorded per function (blob_lazy: u32 offset, u32 kind, u64 reason)
 	.set FX_AT, 0				# u32: the disp32's offset in the code
 	.set FX_END, 4				# u32: the instruction's end (the rip the disp is relative to)
 	.set FX_WHAT, 8				# u32: a constant's index, or an index entry

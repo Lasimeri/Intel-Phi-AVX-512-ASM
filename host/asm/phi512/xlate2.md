@@ -32,3 +32,7 @@ kmovq, vptestmd.
 State: assembled and counted by `tools/recipe-census.c`; the sequences
 have not yet run on a card. The form suites (`tools/avx512-f-forms-test.c`,
 `tools/avx512-narrow-test.c`) on card 0 are the check.
+
+`xl_cvti2s` (2026-10-14): a zero-extended 32-bit source that is eax
+itself now gets its `mov eax, eax` too; the recipe had skipped it and
+converted all of rax when the program had last written rax whole.

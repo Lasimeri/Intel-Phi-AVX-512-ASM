@@ -642,3 +642,44 @@ maps_read:
 9:	popq %r12
 	popq %rbx
 	ret
+
+	.text
+# heap_bounds: the program's [heap] mapping (the main arena's brk heap),
+# start in rax and end in rdx, or both 0 (for region.S's heap walk).
+	.globl heap_bounds
+heap_bounds:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	call maps_read
+	testq %rax, %rax
+	jle 9f
+	leaq maps_buf(%rip), %rsi
+1:	cmpb $0, (%rsi)
+	je 9f
+	call parse_hex
+	movq %rax, %r12				# start
+	incq %rsi				# '-'
+	call parse_hex
+	movq %rax, %r13				# end
+2:	movzbl (%rsi), %ecx			# the rest of the line: "[heap]"?
+	testl %ecx, %ecx
+	jz 9f
+	incq %rsi
+	cmpl $'\n', %ecx
+	je 1b
+	cmpl $'[', %ecx
+	jne 2b
+	cmpl $0x70616568, (%rsi)		# "heap"
+	jne 2b
+	cmpb $']', 4(%rsi)
+	jne 2b
+	movq %r12, %rax
+	movq %r13, %rdx
+	jmp 8f
+9:	xorl %eax, %eax
+	xorl %edx, %edx
+8:	popq %r13
+	popq %r12
+	popq %rbx
+	ret

@@ -34,6 +34,9 @@ s_t2:	.asciz ": translated: "
 s_t3:	.asciz " instructions, "
 s_t4:	.asciz " bytes of blob, "
 s_t5:	.asciz " constants"
+s_z1:	.asciz "phi512:   lazy site at +"
+s_z2:	.asciz ": the host runs it: "
+s_z3:	.asciz ": refused where the card reaches it: "
 s_r1:	.asciz "phi512: "
 s_r2:	.asciz ": translation refused at +"
 s_r3:	.asciz ": "
@@ -234,6 +237,41 @@ translate:
 	call w_str
 	movl $2, %edi
 	call l_end
+	# the lazy sites (blob.S): a line each
+	xorl %ecx, %ecx
+81:	cmpq blob_lazy_n(%rip), %rcx
+	jae 8f
+	cmpq $LAZY_MAX, %rcx
+	jae 8f
+	pushq %rcx
+	pushq %rcx
+	call l_begin
+	leaq s_z1(%rip), %rsi
+	call w_str
+	movq (%rsp), %rax
+	shlq $4, %rax
+	leaq blob_lazy(%rip), %rcx
+	movl (%rcx,%rax), %edi
+	call w_dec
+	movq (%rsp), %rax
+	shlq $4, %rax
+	leaq blob_lazy(%rip), %rcx
+	leaq s_z2(%rip), %rsi
+	cmpl $X_HOST, 4(%rcx,%rax)
+	je 82f
+	leaq s_z3(%rip), %rsi
+82:	call w_str
+	movq (%rsp), %rax
+	shlq $4, %rax
+	leaq blob_lazy(%rip), %rcx
+	movq 8(%rcx,%rax), %rsi
+	call w_str
+	movl $2, %edi
+	call l_end
+	popq %rcx
+	popq %rcx
+	incq %rcx
+	jmp 81b
 8:	xorl %eax, %eax
 	jmp .Lt_out
 .Lt_arena:
