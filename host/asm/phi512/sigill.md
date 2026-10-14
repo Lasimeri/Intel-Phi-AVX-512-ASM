@@ -48,10 +48,14 @@ the card's own compute per request 0.04 to 0.6 ms.
 ## Limits today
 
 The handler runs on the faulting thread's stack (no altstack yet), one
-call at a time (no lock: a single-threaded program). The frame's
-register file is 2256 bytes; the handler's own frame 64 bytes plus the
-file in `.bss` (`file_in`), so a program with several threads faulting
-at once would race on it: stage 4's per-thread slots.
+call at a time: `sigill_lock` (a test-and-test-and-set spin taken after
+the prologue, released at `.Lout`, where every path ends) serializes the
+threads, since the translation, the region path ([`region.md`](region.md):
+the units, the refresh list, `region_file`), the register file in `.bss`
+(`file_in`) and the cards' slots are the process's (2026-10-14: before
+it, the first threads of `llama-server`'s pool faulting at once would
+have raced on all of them). Per-thread slots, so that threads run on
+the cards at once, are stage 4's.
 
 ## Rounds (2026-10-13, later)
 

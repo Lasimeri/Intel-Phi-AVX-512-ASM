@@ -80,6 +80,17 @@ phi512_sigill:
 	pushq %r15
 	subq $80, %rsp
 	movq %rdx, %rbx				# uc
+	# one thread at a time (the translation, the region path, the units,
+	# the refresh list and the cards' slots are the process's): a
+	# test-and-test-and-set spin, released at .Lout
+97:	cmpq $0, sigill_lock(%rip)
+	je 98f
+	pause
+	jmp 97b
+98:	movl $1, %eax
+	xchgq %rax, sigill_lock(%rip)		# (xchg with memory is locked)
+	testq %rax, %rax
+	jnz 97b
 	call now_ns
 	movq %rax, 0(%rsp)
 	movq UC_GREGS + 8 * G_RIP(%rbx), %r12	# rip
@@ -337,7 +348,8 @@ phi512_sigill:
 	call w_str
 	movl $2, %edi
 	call l_end
-.Lout:	addq $80, %rsp
+.Lout:	movq $0, sigill_lock(%rip)		# released (a store is a release on x86-64)
+	addq $80, %rsp
 	popq %r15
 	popq %r14
 	popq %r13
@@ -437,6 +449,8 @@ phi512_sigill:
 	jmp .Lout
 
 	.bss
+	.balign 64
+sigill_lock:	.skip 64			# the handler's lock, a line of its own
 failed_card:	.skip 8
 need_overflow:	.skip 8
 	.text
