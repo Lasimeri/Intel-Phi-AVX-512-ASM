@@ -3283,6 +3283,13 @@ dt_scan_all:
 	movq %rax, %rbx				# the entry
 	cmpb $0, WU_TRK(%rbx)
 	jne 2f
+	# untracked: registered again when it can be (the program freed the
+	# memory and mapped it again: a new mapping is not registered, its
+	# scans fail; llama-bench's second context left 1,954 of 2,275 units
+	# untracked, each read whole at every region, 40 regions/s, lb8);
+	# read whole this once either way
+	movq %rbx, %rdi
+	call dt_register
 	movw $0xffff, WU_DIRTY(%rbx)
 	incq %r12
 	jmp 1b
@@ -3383,7 +3390,7 @@ dt_scan_all:
 	js 82f
 	movw %ax, WU_DIRTY(%rdi)
 	jmp 83f
-82:	movb $0, WU_TRK(%rdi)
+82:	movb $0, WU_TRK(%rdi)			# (registered again at the next region, when it can be)
 	movw $0xffff, WU_DIRTY(%rdi)
 83:	incq %r14
 	jmp 81b
