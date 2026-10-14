@@ -18,9 +18,19 @@ region_run(uc rdi, seed rsi, entry rdx) -> eax 0 (the frame is set),
    (`shadow_merge`): zmm16 to zmm31 and the masks whole; of zmm0 to
    zmm15 the upper 256 bits when the lower 256 are what the last region
    left (a VEX write on the host zeroes them otherwise).
-2. The stack: the 64 KiB unit of rsp minus the red zone and the unit of
-   rsp plus 8 KiB made resident (`wu_ensure`); below the frame's rsp
-   the stack is the handler's own and is never written back (`WU_LO`).
+2. The stack: the 64 KiB units of rsp minus the red zone, of rsp and of
+   rsp plus 8 KiB made resident (`wu_ensure`), then every resident unit
+   of the mapping holding rsp floored (`wu_stack_floors`) at rsp minus
+   128, or at its end when it lies wholly below: below the frame's rsp
+   minus the red zone the stack is the SIGILL handler's own (it has no
+   alternate stack) and is never written back (`WU_LO`). A floor that
+   drops marks the range between for a whole refresh (`wu_set_floor`).
+   The fault path floors again (a stack unit a fault brought in). Before
+   2026-10-14 only the unit of rsp minus 128 took the floor: when that
+   address fell into the unit below, the unit holding rsp kept a higher
+   floor from an earlier region and the lines the region wrote between
+   never came back (a `std::regex` bracket matcher built on the card,
+   "0 line(s) back", a null store in the host; ASLR decided the run).
 3. Every resident unit compared with the program's memory
    (`wu_refresh`): one the host wrote since gets its shadow updated, its
    filled bit on the card cleared and a fill queued; the residency

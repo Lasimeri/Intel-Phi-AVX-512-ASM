@@ -120,10 +120,17 @@ region_run:
 	leaq region_file(%rip), %rdi
 	call shadow_merge
 	call needs_reset
-	# the stack: the unit of rsp - 128 (the red zone) and the one of rsp + 8 KiB
+	# the stack: the units of rsp - 128 (the red zone), rsp and rsp + 8 KiB
+	# resident, then every resident unit of the stack floored
+	# (wu_stack_floors: rsp - 128, or the end of a unit wholly below)
 	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
 	subq $128, %rdi
-	movq %rdi, %rsi
+	xorl %esi, %esi
+	call wu_ensure
+	testl %eax, %eax
+	jnz .Lrg_step
+	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	xorl %esi, %esi
 	call wu_ensure
 	testl %eax, %eax
 	jnz .Lrg_step
@@ -133,6 +140,8 @@ region_run:
 	call wu_ensure
 	testl %eax, %eax
 	jnz .Lrg_step
+	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	call wu_stack_floors
 	call wu_refresh
 	call resident_rounds
 	testl %eax, %eax
@@ -247,6 +256,8 @@ region_run:
 	call wu_ensure
 	testl %eax, %eax
 	jnz .Lrg_step
+	movq UC_GREGS + 8 * G_RSP(%r12), %rdi
+	call wu_stack_floors			# a stack unit the fault brought in floored before any write-back
 	call resident_rounds
 	testl %eax, %eax
 	jnz .Lrg_step
@@ -522,25 +533,83 @@ wu_ensure:
 	movq %rbx, %rax
 7:	testq %r13, %r13
 	jz 71f
-	movq WU_LO(%rax), %rcx
-	testq %rcx, %rcx
-	jz 72f
-	cmpq %rcx, %r13
-	jae 72f
-	# the floor drops: [new, old) must come whole from the host at the next region
-	cmpq $0, WU_FHI(%rax)
-	je 73f
-	cmpq WU_FLO(%rax), %r13
-	jae 74f
-73:	movq %r13, WU_FLO(%rax)
-74:	cmpq WU_FHI(%rax), %rcx
-	jbe 72f
-	movq %rcx, WU_FHI(%rax)
-72:	movq %r13, WU_LO(%rax)
+	movq %rax, %rdi
+	movq %r13, %rsi
+	call wu_set_floor
 71:	xorl %eax, %eax
 	jmp 9f
 8:	movl $1, %eax
 9:	popq %r14
+	popq %r13
+	popq %r12
+	popq %rbx
+	ret
+
+# wu_set_floor(entry rdi, lo rsi): the unit's write-back floor set to lo
+# (an absolute address: a floor below the unit's base leaves it whole, one
+# at its end leaves nothing); when it drops below the old floor, [lo, old)
+# is refreshed whole at the next wu_refresh (the card may have written
+# there, which the shadow never saw). A floor of 0 (a new unit, filled
+# whole) is replaced without a forced range.
+wu_set_floor:
+	movq WU_LO(%rdi), %rcx
+	testq %rcx, %rcx
+	jz 2f
+	cmpq %rcx, %rsi
+	jae 2f
+	cmpq $0, WU_FHI(%rdi)
+	je 1f
+	cmpq WU_FLO(%rdi), %rsi
+	jae 3f
+1:	movq %rsi, WU_FLO(%rdi)
+3:	cmpq WU_FHI(%rdi), %rcx
+	jbe 2f
+	movq %rcx, WU_FHI(%rdi)
+2:	movq %rsi, WU_LO(%rdi)
+	ret
+
+# wu_stack_floors(rsp rdi): every resident unit of the mapping holding rsp
+# (the thread's stack) floored at min(rsp - 128, the unit's end): a unit
+# the region may use gets rsp - 128 (the red zone and above are the
+# program's), a unit wholly below gets its end (the SIGILL handler runs
+# there, on the program's stack: a write-back into it would overwrite
+# the handler's frames). Every unit, whichever path made it resident: a
+# floor kept from an earlier region was the bug of 2026-10-14 (the unit
+# of rsp kept a higher floor when rsp - 128 fell into the unit below,
+# and the lines the region wrote between came back as nothing).
+wu_stack_floors:
+	pushq %rbx
+	pushq %r12
+	pushq %r13
+	pushq %r14
+	pushq %r15
+	movq %rdi, %r12
+	call mapped_range
+	testq %rax, %rax
+	jz 9f
+	movq %rax, %r13				# the mapping's start
+	movq %rdx, %r14				# its end
+	leaq wu_tab(%rip), %rbx
+	movq wu_n(%rip), %r15
+1:	testq %r15, %r15
+	jz 9f
+	movq WU_ADDR(%rbx), %rax
+	cmpq %r14, %rax
+	jae 8f
+	leaq UNIT(%rax), %rsi			# the unit's end
+	cmpq %r13, %rsi
+	jbe 8f
+	leaq -128(%r12), %rcx
+	cmpq %rsi, %rcx
+	jae 2f
+	movq %rcx, %rsi
+2:	movq %rbx, %rdi
+	call wu_set_floor
+8:	addq $WU_BYTES, %rbx
+	decq %r15
+	jmp 1b
+9:	popq %r15
+	popq %r14
 	popq %r13
 	popq %r12
 	popq %rbx
